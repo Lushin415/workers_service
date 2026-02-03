@@ -1,0 +1,39 @@
+{
+  "comment": "Пример конфигурации для Workers Service",
+  "telegram": {
+    "api_id": 12345678,
+    "api_hash": "0123456789abcdef0123456789abcdef",
+    "comment": "Получить на https://my.telegram.org"
+  },
+  "bot": {
+    "token": "1234567890:ABCdefGHIjklMNOpqrsTUVwxyz",
+    "comment": "Токен бота для уведомлений (получить у @BotFather)"
+  },
+  "user": {
+    "user_id": 338908929,
+    "chat_id": 338908929,
+    "comment": "Ваш Telegram User ID (получить у @userinfobot)"
+  },
+  "monitoring": {
+    "mode": "worker",
+    "comment_mode": "Режим: 'worker' (ищут работу) или 'employer' (ищут сотрудников)",
+    "chats": [
+      "@pvz_workers_moscow",
+      "@wildberries_rabota",
+      "@ozon_work"
+    ],
+    "comment_chats": "Публичные Telegram каналы/группы для мониторинга",
+    "parse_history_days": 14,
+    "comment_history": "Количество дней истории для парсинга при запуске"
+  },
+  "filters": {
+    "date_from": "2026-02-10",
+    "date_to": "2026-02-20",
+    "comment_dates": "Диапазон дат работы (ISO format)",
+    "min_price": 2000,
+    "max_price": 5000,
+    "comment_price": "Диапазон цен в рублях за смену",
+    "shk_filter": "любое",
+    "comment_shk": "Фильтр по ШК: 'любое', конкретное число ('100'), или 'мало'/'много'/'средне'"
+  }
+}
