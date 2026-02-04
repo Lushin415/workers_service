@@ -1,0 +1,49 @@
+App api_id:
+31834015
+App api_hash:
+7435e77a18431b9d3ac0c3bc7ee8bfc8
+tg_token = "8374925023:AAG9QwKAfXnwDZ4ZvtjP6zaoaqkEXeZn6p8"
+tg_chat_id = [338908929]
+чаты и группы: https://t.me/Rabota_Zamena_PVZ, t.me/pvz_zamena. Я не могу найти в том формате, который ты укаал.
+
+
+curl -X POST http://localhost:8002/workers/start \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": 338908929,
+    "mode": "worker",
+    "chats": ["@Rabota_Zamena_PVZ", "@pvz_zamena"],
+    "filters": {
+      "date_from": "2026-02-04",
+      "date_to": "2026-02-04",
+      "min_price": 2000,
+      "max_price": 5000,
+      "shk_filter": "любое"
+    },
+    "api_id": 31834015,
+    "api_hash": "7435e77a18431b9d3ac0c3bc7ee8bfc8",
+    "notification_bot_token": "8374925023:AAG9QwKAfXnwDZ4ZvtjP6zaoaqkEXeZn6p8",
+    "notification_chat_id": 338908929,
+    "parse_history_days": 1
+  }'
+
+
+curl -X POST http://localhost:8002/workers/start \
+    -H "Content-Type: application/json" \
+    -d '{
+      "user_id": 338908929,
+      "mode": "employer",
+      "chats": ["@pvz_zamena"],
+      "filters": {
+        "date_from": "2026-02-04",
+        "date_to": "2026-02-06",
+        "min_price": 2000,
+        "max_price": 5000,
+        "shk_filter": "любое"
+      },
+      "notification_bot_token": "8374925023:AAG9QwKAfXnwDZ4ZvtjP6zaoaqkEXeZn6p8",
+      "notification_chat_id": 338908929,
+      "parse_history_days": 3,
+      "api_id": 31834015,
+      "api_hash": "7435e77a18431b9d3ac0c3bc7ee8bfc8"
+    }'

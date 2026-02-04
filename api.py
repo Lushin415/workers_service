@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from loguru import logger
 
+from config import config
 from models_api import (
     StartMonitoringRequest,
     StartMonitoringResponse,
@@ -24,7 +25,7 @@ from tasks import start_monitoring_task
 
 
 # Настройка логирования
-logger.add("workers_service.log", rotation="10 MB", level="INFO")
+logger.add(config.LOG_PATH, rotation="10 MB", level="INFO")
 
 # Создание FastAPI приложения
 app = FastAPI(
@@ -34,7 +35,7 @@ app = FastAPI(
 )
 
 # Сервис БД
-db_service = DBService()
+db_service = DBService(db_path=config.DB_PATH)
 
 
 @app.on_event("startup")
@@ -52,6 +53,12 @@ async def root():
         "version": "1.0.0",
         "status": "running"
     }
+
+
+@app.get("/health")
+async def health_check():
+    """Healthcheck для Docker"""
+    return {"status": "healthy"}
 
 
 @app.post("/workers/start", response_model=StartMonitoringResponse)
@@ -267,4 +274,4 @@ async def check_blacklist(item_id: int, task_id: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8002)
+    uvicorn.run(app, host=config.HOST, port=config.PORT)

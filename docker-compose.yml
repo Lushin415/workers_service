@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  workers-service:
+    build: .
+    container_name: workers_service
+    restart: always
+    ports:
+      - "8002:8002"
+    volumes:
+      # Сессия Telegram (ВАЖНО: сохраняем между перезапусками)
+      - ./data/sessions:/app/sessions
+      # База данных SQLite
+      - ./data/db:/app/db
+      # Логи
+      - ./data/logs:/app/logs
+    env_file:
+      - .env
+    environment:
+      - TZ=Europe/Moscow
+      # Переопределяем пути для Docker
+      - DB_PATH=/app/db/workers.db
+      - SESSION_PATH=/app/sessions/workers_session
+      - LOG_PATH=/app/logs/workers_service.log
+      - HOST=0.0.0.0
+      - PORT=8002
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

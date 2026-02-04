@@ -1,0 +1,41 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*.so
+.Python
+*.egg-info
+.eggs
+
+# Virtual environment
+.venv
+venv
+ENV
+
+# IDE
+.idea
+.vscode
+*.swp
+
+# Tests
+tests/
+test_*.py
+
+# Local data (will be mounted as volumes)
+*.db
+*.session
+*.session-journal
+*.log
+data/
+
+# Docs
+*.md
+!README.md
+
+# Other
+.env
+sometime.txt
+config.example.json

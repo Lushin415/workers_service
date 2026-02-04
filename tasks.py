@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import List
 from loguru import logger
 
+from config import config
 from parser import TelegramParser
 from message_extractor import MessageExtractor
 from filters import ItemFilter
@@ -53,7 +54,7 @@ class MonitoringTask:
         )
 
         # Сервисы
-        self.db = DBService()
+        self.db = DBService(db_path=config.DB_PATH)
         self.parser = None
         self.notifier = TelegramNotifier(notification_bot_token, notification_chat_id)
 
@@ -257,7 +258,7 @@ class MonitoringTask:
             self.parser = TelegramParser(
                 api_id=self.api_id,
                 api_hash=self.api_hash,
-                session_name="workers_session"  # Используем общую авторизованную сессию
+                session_name=config.SESSION_PATH  # Путь к сессии (из .env)
             )
 
             # Запускаем клиент
