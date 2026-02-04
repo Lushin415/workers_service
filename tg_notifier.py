@@ -40,8 +40,27 @@ class TelegramNotifier:
         if item_data.get('shk'):
             message_parts.append(f"📦 ШК: {item_data['shk']}")
 
-        if item_data.get('location'):
-            message_parts.append(f"📍 Локация: {item_data['location']}")
+        # Информация о топике (для форумов/супергрупп) - СРАЗУ после цены!
+        if item_data.get('topic_name'):
+            message_parts.append(f"🏷️ Топик: {item_data['topic_name']}")
+
+        # Структурированная локация (город, метро, район)
+        location_parts = []
+
+        if item_data.get('city'):
+            location_parts.append(f"🏙️ Город: {item_data['city']}")
+
+        if item_data.get('metro_station'):
+            location_parts.append(f"🚇 Метро: {item_data['metro_station']}")
+
+        if item_data.get('district'):
+            location_parts.append(f"📍 Район: {item_data['district']}")
+
+        # Если есть старое поле location (для обратной совместимости)
+        if not location_parts and item_data.get('location'):
+            location_parts.append(f"📍 Локация: {item_data['location']}")
+
+        message_parts.extend(location_parts)
 
         # Информация об авторе
         author_info = []

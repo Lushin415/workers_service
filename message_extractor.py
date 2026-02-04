@@ -17,13 +17,23 @@ class MessageExtractor:
     EMPLOYER_KEYWORDS = [
         # Явные признаки работодателя
         "требуется сотрудник", "требуются сотрудник", "требуется работник",
-        "требуется оператор", "требуется замена на",
+        "требуется оператор", "требуется замена",
         "нужен сотрудник", "нужны сотрудник", "нужен работник", "нужны работник",
         "нужна сотрудница", "нужны сотрудниц",
         "ищу сотрудника", "ищем сотрудника", "ищем работника",
         "ищу работника", "ищу на замену", "ищем на замену",
         "нужна девочка", "нужен парень", "нужна девушка", "нужен мужчина",
         "требуются работники", "нужны работники",
+
+        # Дополнительные варианты
+        "нужна замена", "нужен на замену", "нужна на замену",
+        "ищу замену", "ищем замену", "ищется замена",
+        "срочно нужен", "срочно нужна", "срочно требуется",
+        "требуются на", "нужны на",
+        "приглашаем на работу", "приглашаем в команду",
+        "вакансия", "открыта вакансия",
+        "набираем", "набираем сотрудников", "набор сотрудников",
+        "ищем в команду", "в команду нужен", "в команду нужна",
 
         # Контекстные признаки (вакансия)
         "на постоянную работу", "постоянные работники", "постоянного работника",
@@ -131,7 +141,7 @@ class MessageExtractor:
             return (message_date + timedelta(days=2)).date().isoformat()
         elif 'завтра' in text:
             return (message_date + timedelta(days=1)).date().isoformat()
-        elif 'сегодня' in text:
+        elif 'сегодня' in text or 'сейчас' in text:
             return message_date.date().isoformat()
 
         # Дата с названием месяца (15 февраля)
@@ -165,7 +175,7 @@ class MessageExtractor:
 
     @staticmethod
     def extract_location(text: str) -> Optional[str]:
-        """Извлечь локацию (город)"""
+        """Извлечь локацию (город) - старый метод для обратной совместимости"""
         # Ищем слова с заглавной буквы (потенциальные названия городов)
         matches = re.findall(MessageExtractor.LOCATION_PATTERN, text)
 
@@ -177,6 +187,88 @@ class MessageExtractor:
                 return match
 
         return None
+
+    @staticmethod
+    def extract_location_structured(text: str, topic_name: Optional[str] = None) -> dict:
+        """
+        Умное извлечение локации (структурированное)
+
+        Извлекает:
+        - city: Город (Москва, СПБ) - из топика или из текста
+        - metro_station: Станция метро (Водный стадион, Выхино)
+        - district: Район (ЮВАО, ЮАО, ЦАО)
+
+        Args:
+            text: текст сообщения
+            topic_name: название топика (например, "МСК - Ozon")
+
+        Returns:
+            dict с ключами: city, metro_station, district
+        """
+        text_lower = text.lower()
+
+        result = {
+            'city': None,
+            'metro_station': None,
+            'district': None
+        }
+
+        # 1. ГОРОД (приоритет: топик → текст)
+
+        # Из топика (если есть)
+        if topic_name:
+            topic_lower = topic_name.lower()
+            if 'мск' in topic_lower or 'москва' in topic_lower:
+                result['city'] = 'Москва'
+            elif 'спб' in topic_lower or 'питер' in topic_lower or 'санкт' in topic_lower:
+                result['city'] = 'Санкт-Петербург'
+
+        # Из текста (если не нашли в топике)
+        if not result['city']:
+            CITIES = {
+                'москва': 'Москва',
+                'мск': 'Москва',
+                'moscow': 'Москва',
+                'спб': 'Санкт-Петербург',
+                'питер': 'Санкт-Петербург',
+                'санкт-петербург': 'Санкт-Петербург',
+                'зеленоград': 'Зеленоград',
+                'мо': 'Московская область',
+                'подмосковье': 'Московская область'
+            }
+
+            for key, city in CITIES.items():
+                if key in text_lower:
+                    result['city'] = city
+                    break
+
+        # 2. МЕТРО
+
+        # Паттерны для метро
+        metro_patterns = [
+            r'(?:метро|м\.|мцк)\s+([А-Яа-яЁё\s]+?)(?:\s|,|\.|\n|$)',  # "метро Водный стадион"
+            r'(?:^|\n)([А-Я][а-я]+(?:\s[А-Я][а-я]+)?)\s+метро',  # "Выхино метро"
+        ]
+
+        for pattern in metro_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                station = match.group(1).strip()
+                # Исключаем слишком общие слова
+                if len(station) > 3 and station.lower() not in ['любое', 'не важно', 'любой']:
+                    result['metro_station'] = station.title()
+                    break
+
+        # 3. РАЙОН (округа Москвы)
+
+        DISTRICTS = ['юао', 'ювао', 'цао', 'сао', 'свао', 'сзао', 'зао', 'юзао']
+
+        for district in DISTRICTS:
+            if district in text_lower:
+                result['district'] = district.upper()
+                break
+
+        return result
 
     @staticmethod
     def extract(text: str, message_date: datetime) -> Optional[Dict]:

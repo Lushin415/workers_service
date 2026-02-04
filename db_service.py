@@ -63,6 +63,38 @@ class DBService:
                 ON found_items(content_hash, found_at)
             """)
 
+            # Миграция: добавляем topic_id и topic_name (если еще не добавлены)
+            try:
+                await db.execute("ALTER TABLE found_items ADD COLUMN topic_id INTEGER")
+                logger.info("Добавлен столбец topic_id")
+            except:
+                pass  # Столбец уже существует
+
+            try:
+                await db.execute("ALTER TABLE found_items ADD COLUMN topic_name TEXT")
+                logger.info("Добавлен столбец topic_name")
+            except:
+                pass  # Столбец уже существует
+
+            # Миграция: добавляем структурированные поля локации
+            try:
+                await db.execute("ALTER TABLE found_items ADD COLUMN city TEXT")
+                logger.info("Добавлен столбец city")
+            except:
+                pass
+
+            try:
+                await db.execute("ALTER TABLE found_items ADD COLUMN metro_station TEXT")
+                logger.info("Добавлен столбец metro_station")
+            except:
+                pass
+
+            try:
+                await db.execute("ALTER TABLE found_items ADD COLUMN district TEXT")
+                logger.info("Добавлен столбец district")
+            except:
+                pass
+
             await db.commit()
             logger.info("База данных инициализирована")
 
@@ -167,6 +199,72 @@ class DBService:
                     )
                     return False
 
+    async def check_duplicate_by_author(
+        self,
+        author_username: Optional[str],
+        work_date: str,
+        price: int,
+        hours_window: int = 24
+    ) -> bool:
+        """
+        Проверка дубликатов по автору (УРОВЕНЬ 2 дедупликации)
+
+        Логика:
+        - Автор + дата работы + цена = уникальная комбинация
+        - Если автор меняет ЦЕНУ → НЕ дубликат (важно!)
+        - Если автор ищет работу на ДРУГОЙ ДЕНЬ → НЕ дубликат
+        - Если автор копирует в разные чаты → дубликат
+        - Через 24 часа сброс (автор может снова разместить)
+
+        Примеры:
+        1. "Ivan" + "2026-02-03" + "3000" в чат1 (10:00) → сохранили
+        2. "Ivan" + "2026-02-03" + "3000" в чат2 (11:00) → ДУБЛИКАТ ❌
+        3. "Ivan" + "2026-02-03" + "2500" в чат3 (12:00) → НОВОЕ (цена!) ✅
+        4. "Ivan" + "2026-02-05" + "3000" в чат4 (13:00) → НОВОЕ (дата!) ✅
+
+        Args:
+            author_username: username автора (может быть None для анонимных)
+            work_date: дата работы (ISO format)
+            price: цена за смену
+            hours_window: временное окно в часах (по умолчанию 24)
+
+        Returns:
+            True если дубликат, False если новое объявление
+        """
+        # Если автора нет (анонимное сообщение) → проверка невозможна
+        if not author_username:
+            return False
+
+        async with aiosqlite.connect(self.db_path) as db:
+            # Временная метка N часов назад
+            from datetime import datetime, timedelta
+            time_threshold = (datetime.utcnow() - timedelta(hours=hours_window)).isoformat()
+
+            # Ищем записи от ЭТОГО АВТОРА с ЭТОЙ ДАТОЙ и ЭТОЙ ЦЕНОЙ за последние N часов
+            async with db.execute("""
+                SELECT id FROM found_items
+                WHERE author_username = ?
+                  AND date = ?
+                  AND price = ?
+                  AND found_at > ?
+                LIMIT 1
+            """, (author_username, work_date, price, time_threshold)) as cursor:
+                row = await cursor.fetchone()
+
+                if row:
+                    # Нашли запись от этого автора с той же датой и ценой → ДУБЛИКАТ
+                    logger.debug(
+                        f"Дубликат по автору: {author_username}, дата={work_date}, цена={price}"
+                    )
+                    return True
+                else:
+                    # Не нашли → это НОВОЕ объявление
+                    # (автор либо изменил цену, либо ищет работу на другой день)
+                    logger.debug(
+                        f"Новое объявление от {author_username}: дата={work_date}, цена={price}"
+                    )
+                    return False
+
     async def add_found_item(self, item: FoundItem) -> Optional[int]:
         """
         Добавить найденное объявление (с умной дедупликацией)
@@ -196,14 +294,16 @@ class DBService:
                 cursor = await db.execute("""
                     INSERT INTO found_items
                     (task_id, mode, author_username, author_full_name, date, price,
-                     shk, location, message_text, message_link, chat_name,
-                     message_date, found_at, notified, content_hash)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     shk, location, city, metro_station, district,
+                     message_text, message_link, chat_name,
+                     message_date, found_at, notified, content_hash, topic_id, topic_name)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     item.task_id, item.mode, item.author_username, item.author_full_name,
-                    item.date, item.price, item.shk, item.location, item.message_text,
-                    item.message_link, item.chat_name, item.message_date,
-                    item.found_at, item.notified, item.content_hash
+                    item.date, item.price, item.shk, item.location,
+                    item.city, item.metro_station, item.district,
+                    item.message_text, item.message_link, item.chat_name, item.message_date,
+                    item.found_at, item.notified, item.content_hash, item.topic_id, item.topic_name
                 ))
                 await db.commit()
                 logger.info(f"Добавлено объявление: {item.message_link}")

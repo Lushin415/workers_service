@@ -4,8 +4,10 @@
 import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import Message
+from pyrogram.raw.functions.channels import GetForumTopics
+from pyrogram.raw.types import InputPeerChannel
 from datetime import datetime, timedelta
-from typing import List, Callable
+from typing import List, Callable, Dict
 from loguru import logger
 
 
@@ -41,6 +43,82 @@ class TelegramParser:
         if self.client:
             await self.client.stop()
             logger.info("Pyrogram клиент остановлен")
+
+    async def get_forum_topics(self, chat_username: str) -> Dict[int, str]:
+        """
+        Получить список топиков форума через GetForumTopics (raw API)
+
+        Args:
+            chat_username: имя чата (например, @pvz_zamena)
+
+        Returns:
+            Словарь {topic_id: topic_name}
+        """
+        if not self.client:
+            logger.error("Клиент не запущен")
+            return {}
+
+        try:
+            # Получаем информацию о чате
+            chat = await self.client.get_chat(chat_username)
+            chat_id = chat.id
+
+            logger.info(f"🔍 Получение топиков в {chat_username}")
+            logger.info(f"   Chat ID: {chat_id}")
+            logger.info(f"   Chat type: {chat.type}")
+            logger.info(f"   Title: {chat.title}")
+
+            topics_map = {}
+
+            # Получаем peer (должен быть InputPeerChannel для supergroup/channel)
+            peer = await self.client.resolve_peer(chat_id)
+
+            # Проверяем, что это channel/supergroup
+            if not isinstance(peer, InputPeerChannel):
+                logger.error(f"❌ Чат {chat_username} не является channel/supergroup (тип: {type(peer).__name__})")
+                return {}
+
+            logger.info(f"   ✅ Peer type: {type(peer).__name__}")
+
+            # Вызываем raw API: GetForumTopics
+            result = await self.client.invoke(
+                GetForumTopics(
+                    channel=peer,
+                    offset_date=0,
+                    offset_id=0,
+                    offset_topic=0,
+                    limit=100
+                )
+            )
+
+            # Извлекаем топики из результата
+            logger.info(f"   Result type: {type(result).__name__}")
+
+            if hasattr(result, 'topics'):
+                logger.info(f"   📋 Найдено {len(result.topics)} топиков")
+
+                for topic in result.topics:
+                    topic_id = topic.id
+                    topic_title = topic.title
+                    topics_map[topic_id] = topic_title
+                    logger.info(f"   ✅ Топик: ID={topic_id}, Название='{topic_title}'")
+
+                logger.info(f"📊 Успешно загружено {len(topics_map)} топиков из {chat_username}")
+                return topics_map
+            else:
+                logger.warning(f"⚠️  Result не содержит 'topics': {type(result)}")
+                return {}
+
+        except Exception as e:
+            # CHANNEL_FORUM_MISSING - это нормально для обычных чатов (не форумов)
+            if "CHANNEL_FORUM_MISSING" in str(e):
+                logger.info(f"ℹ️  Чат {chat_username} не является форумом (топиков нет)")
+                return {}
+            else:
+                logger.error(f"❌ Ошибка при получении топиков из {chat_username}: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                return {}
 
     async def parse_history(
         self,

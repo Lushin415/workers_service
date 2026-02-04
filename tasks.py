@@ -57,6 +57,9 @@ class MonitoringTask:
         self.parser = None
         self.notifier = TelegramNotifier(notification_bot_token, notification_chat_id)
 
+        # Кэш топиков: {chat_username: {topic_id: topic_name}}
+        self.topics_cache = {}
+
         # Событие остановки
         self.stop_event = state_manager.create_task(task_id, mode)
 
@@ -95,17 +98,95 @@ class MonitoringTask:
             if message.from_user:
                 author_full_name = f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip()
 
+            # Извлекаем topic_id и topic_name (для форумов/супергрупп)
+            topic_id = None
+            topic_name = None
+
+            # Pyrogram предоставляет message_thread_id для сообщений в топиках
+            if hasattr(message, 'message_thread_id') and message.message_thread_id:
+                topic_id = message.message_thread_id
+                logger.debug(f"Сообщение из топика: topic_id={topic_id}")
+            elif hasattr(message, 'reply_to_message_id') and message.reply_to_message_id:
+                # Fallback: используем reply_to_message_id если это похоже на топик
+                # (разница ID больше 100 = не обычный reply на соседнее сообщение)
+                if message.reply_to_message_id < message.id - 100:
+                    topic_id = message.reply_to_message_id
+                    logger.debug(f"Сообщение из топика (через reply_to): topic_id={topic_id}")
+
+            if topic_id:
+
+                # Получаем название топика из кэша (вместо извлечения из текста!)
+                if chat_name in self.topics_cache:
+                    topics_map = self.topics_cache[chat_name]
+                    if topic_id in topics_map:
+                        topic_name = topics_map[topic_id]
+                        logger.debug(f"Название топика из кэша: {topic_name}")
+                    else:
+                        logger.warning(f"Топик с ID {topic_id} не найден в кэше для {chat_name}")
+                else:
+                    logger.debug(f"Кэш топиков для {chat_name} пуст")
+
+                # Fallback: попытка извлечь из текста (если не нашли в кэше)
+                if not topic_name and message_text:
+                    import re
+                    # Ищем паттерны топиков (в начале сообщения или в любом месте)
+                    topic_patterns = [
+                        # Паттерн с дефисом: "МСК - Ozon", "СПБ - WB"
+                        r'(МСК|СПБ|СБП|Москва|Питер|Мск|Спб)\s*[-–—]\s*(ВБ|Озон|Ozon|WB|Wildberries|Яндекс\.?Маркет|ЯМ|Я\.Маркет)',
+                        # Паттерн со стрелкой: "СПБ -> Я.Маркет", "МСК -> Озон"
+                        r'(МСК|СПБ|СБП|Москва|Питер|Мск|Спб)\s*->\s*(ВБ|Озон|Ozon|WB|Wildberries|Яндекс\.?Маркет|ЯМ|Я\.Маркет)',
+                        # Паттерн с хэштегом: "#мск_озон", "#спб_вб"
+                        r'#(мск|спб|москва|питер)[\s_]*(вб|озон|ozon|wb|wildberries|ям)',
+                    ]
+                    for pattern in topic_patterns:
+                        match = re.search(pattern, message_text, re.IGNORECASE)
+                        if match:
+                            topic_name = match.group(0).strip()
+                            logger.debug(f"Fallback: извлечено название топика из текста: {topic_name}")
+                            break
+
+            # Умное извлечение локации (структурированное)
+            # Город извлекается из топика (если есть) или из текста
+            location_data = MessageExtractor.extract_location_structured(message_text, topic_name)
+            city = location_data['city']
+            metro_station = location_data['metro_station']
+            district = location_data['district']
+
             # Формируем ссылку на сообщение
             message_link = f"https://t.me/{chat_name.lstrip('@')}/{message.id}"
 
-            # Создаем хеш содержимого для умной дедупликации
-            # (БЕЗ учета даты работы - если дата изменится, это новое объявление)
+            # ДВУХУРОВНЕВАЯ ДЕДУПЛИКАЦИЯ:
+
+            # Уровень 1: Content hash (защита от копипасты)
             content_hash = Deduplicator.create_content_hash(
                 author_username=author_username,
                 price=extracted['price'],
                 location=extracted.get('location'),
                 message_text=message_text
             )
+
+            # Уровень 2: Author-based (защита от кросс-постов)
+            # Проверяем: автор + дата + цена (если автор меняет цену → новое уведомление!)
+            if author_username:
+                is_author_duplicate = await self.db.check_duplicate_by_author(
+                    author_username=author_username,
+                    work_date=extracted['date'],
+                    price=extracted['price'],
+                    hours_window=24
+                )
+
+                if is_author_duplicate:
+                    logger.debug(
+                        f"Пропущен дубликат по автору: {author_username}, "
+                        f"дата={extracted['date']}, цена={extracted['price']}"
+                    )
+                    state_manager.update_stats(self.task_id, messages_scanned=1)
+                    return  # Пропускаем дубликат
+                else:
+                    logger.debug(
+                        f"Новое объявление от автора: {author_username}, "
+                        f"дата={extracted['date']}, цена={extracted['price']}"
+                    )
 
             # Создаем объект для БД
             found_item = FoundItem(
@@ -117,14 +198,19 @@ class MonitoringTask:
                 date=extracted['date'],
                 price=extracted['price'],
                 shk=extracted.get('shk'),
-                location=extracted.get('location'),
+                location=extracted.get('location'),  # Старое поле (для обратной совместимости)
+                city=city,  # Город (Москва, СПБ)
+                metro_station=metro_station,  # Станция метро
+                district=district,  # Район (ЮВАО, ЮАО)
                 message_text=message_text,
                 message_link=message_link,
                 chat_name=chat_name,
                 message_date=message_date.isoformat(),
                 found_at=datetime.utcnow().isoformat(),
                 notified=False,
-                content_hash=content_hash
+                content_hash=content_hash,
+                topic_id=topic_id,  # ID топика (для форумов)
+                topic_name=topic_name  # Название топика (МСК - Ozon, СПБ - WB и т.д.)
             )
 
             # Сохраняем в БД (с дедупликацией)
@@ -139,7 +225,11 @@ class MonitoringTask:
                     'date': extracted['date'],
                     'price': extracted['price'],
                     'shk': extracted.get('shk'),
-                    'location': extracted.get('location'),
+                    'location': extracted.get('location'),  # Старое поле (для обратной совместимости)
+                    'city': city,  # Город (из топика или из текста)
+                    'metro_station': metro_station,  # Станция метро
+                    'district': district,  # Район
+                    'topic_name': topic_name,  # Название топика (МСК - Ozon и т.д.)
                     'author_username': author_username,
                     'author_full_name': author_full_name,
                     'chat_name': chat_name,
@@ -175,6 +265,16 @@ class MonitoringTask:
 
             # Обновляем статус
             state_manager.update_status(self.task_id, "running")
+
+            # Загружаем топики для каждого чата (если это форум)
+            logger.info(f"Загружаем список топиков для чатов...")
+            for chat in self.chats:
+                topics = await self.parser.get_forum_topics(chat)
+                if topics:
+                    self.topics_cache[chat] = topics
+                    logger.info(f"Загружено {len(topics)} топиков для {chat}")
+                else:
+                    logger.debug(f"Чат {chat} не является форумом или топики недоступны")
 
             # Парсим историю
             logger.info(f"Начинаем парсинг истории для задачи {self.task_id}")

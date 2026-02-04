@@ -1,5 +1,8 @@
 """
-Умная дедупликация объявлений
+Умная дедупликация объявлений (двухуровневая)
+
+Уровень 1: Content hash (защита от копипасты)
+Уровень 2: Author-based (защита от кросс-постов + изменение цены)
 """
 import hashlib
 from typing import Optional
@@ -17,6 +20,8 @@ class Deduplicator:
     ) -> str:
         """
         Создать хеш содержимого объявления (БЕЗ учета даты работы и автора!)
+
+        УРОВЕНЬ 1: Content-based deduplication
 
         Логика:
         - Одинаковый текст с той же ценой = дубликат (независимо от автора!)
@@ -46,6 +51,39 @@ class Deduplicator:
         # Создаем SHA256 хеш
         hash_obj = hashlib.sha256(content.encode('utf-8'))
         return hash_obj.hexdigest()
+
+    @staticmethod
+    def create_author_key(
+        author_username: str,
+        work_date: str,
+        price: int
+    ) -> str:
+        """
+        Создать ключ для author-based дедупликации
+
+        УРОВЕНЬ 2: Author-based deduplication
+
+        Логика:
+        - Автор + дата работы + цена = уникальная комбинация
+        - Если автор меняет ЦЕНУ → новое уведомление (ВАЖНО!)
+        - Если автор ищет работу на ДРУГОЙ ДЕНЬ → новое уведомление
+        - Если автор копирует одно и то же в разные чаты → дубликат
+        - Через 24 часа старые записи удаляются → автор может снова разместить
+
+        Примеры:
+        1. "Ivan" + "2026-02-03" + "3000" → ключ1
+        2. "Ivan" + "2026-02-03" + "2500" → ключ2 (другая цена → НОВОЕ!)
+        3. "Ivan" + "2026-02-05" + "3000" → ключ3 (другой день → НОВОЕ!)
+
+        Args:
+            author_username: username автора
+            work_date: дата работы (ISO format)
+            price: цена за смену
+
+        Returns:
+            Строковый ключ для проверки дубликатов
+        """
+        return f"{author_username}|{work_date}|{price}"
 
     @staticmethod
     def is_duplicate(

@@ -32,7 +32,10 @@ class FoundItem:
     date: str
     price: int
     shk: Optional[str]
-    location: Optional[str]
+    location: Optional[str]  # Общее поле локации (для обратной совместимости)
+    city: Optional[str]  # Город (Москва, СПБ)
+    metro_station: Optional[str]  # Станция метро
+    district: Optional[str]  # Район (ЮВАО, ЮАО)
     message_text: str
     message_link: str
     chat_name: str
@@ -40,3 +43,5 @@ class FoundItem:
     found_at: str
     notified: bool = False
     content_hash: Optional[str] = None  # Хеш для умной дедупликации
+    topic_id: Optional[int] = None  # ID топика (для форумов/супергрупп)
+    topic_name: Optional[str] = None  # Название топика (например, "МСК - Ozon")
