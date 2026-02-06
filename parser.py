@@ -28,15 +28,18 @@ class TelegramParser:
 
     async def start(self):
         """Запустить клиент Pyrogram"""
+        # ВАЖНО: НЕ указываем workdir, так как session_name содержит ПОЛНЫЙ путь
+        # (например: /shared/sessions/338908929_parser)
+        # Pyrogram сам добавит .session расширение
         self.client = Client(
             name=self.session_name,
             api_id=self.api_id,
             api_hash=self.api_hash,
-            workdir="."
+            # workdir НЕ УКАЗЫВАЕМ - используется полный путь из name
         )
 
         await self.client.start()
-        logger.info("Pyrogram клиент запущен")
+        logger.info(f"Pyrogram клиент запущен (сессия: {self.session_name})")
 
     async def stop(self):
         """Остановить клиент"""
@@ -189,13 +192,22 @@ class TelegramParser:
             logger.error("Клиент не запущен")
             return
 
-        # Создаем фильтр для указанных чатов
-        chat_filter = filters.chat(chat_usernames)
+        logger.info(f"[REALTIME] Регистрация handlers для чатов: {chat_usernames}")
 
-        @self.client.on_message(chat_filter)
+        # Убираем @ из usernames (filters.chat ожидает без @)
+        clean_usernames = [username.lstrip('@') for username in chat_usernames]
+        logger.info(f"[REALTIME] Чистые usernames для фильтра: {clean_usernames}")
+
+        # Создаем фильтр для указанных чатов
+        chat_filter = filters.chat(clean_usernames)
+
+        # Основной обработчик для отфильтрованных сообщений
         async def message_handler(client, message: Message):
+            logger.info(f"✉️ [REALTIME] Получено новое сообщение в чате: {message.chat.username or message.chat.title}")
+
             # Пропускаем сервисные сообщения
             if not message.text:
+                logger.debug(f"[REALTIME] Пропускаем сообщение без текста (service message)")
                 return
 
             # Определяем имя чата
@@ -205,20 +217,79 @@ class TelegramParser:
             else:
                 chat_username = message.chat.title or str(message.chat.id)
 
+            logger.info(f"[REALTIME] Обрабатываем новое сообщение из {chat_username}: {message.text[:50]}...")
+
             # Вызываем обработчик
             await handler(message, chat_username)
 
-        logger.info(f"Настроен real-time мониторинг чатов: {', '.join(chat_usernames)}")
+        # Регистрируем handler через add_handler
+        from pyrogram.handlers import MessageHandler as PyrogramMessageHandler
 
-    async def run_until_stopped(self, stop_event):
+        self.client.add_handler(PyrogramMessageHandler(message_handler, filters=chat_filter))
+        logger.info(f"✅ Настроен real-time мониторинг чатов: {', '.join(chat_usernames)}")
+
+    async def run_until_stopped(self, stop_event: asyncio.Event):
         """
-        Запустить клиент и ждать до остановки
+        Ждать до сигнала остановки с автоматическим переподключением.
+
+        Pyrogram обрабатывает updates через внутренние asyncio tasks на том же event loop.
+        Мы периодически проверяем соединение и переподключаемся при необходимости.
 
         Args:
-            stop_event: threading.Event для остановки
+            stop_event: asyncio.Event для остановки
         """
-        # Ждем сигнала остановки
-        while not stop_event.is_set():
-            await asyncio.sleep(1)
+        try:
+            # Загружаем чаты в session storage чтобы избежать "Peer id invalid"
+            logger.info("Загрузка диалогов в кэш сессии...")
+            async for dialog in self.client.get_dialogs(limit=100):
+                pass  # Просто итерируем чтобы загрузить в кэш
+            logger.info("Диалоги загружены в кэш")
 
-        logger.info("Получен сигнал остановки парсера")
+            # Проверяем что клиент подключён
+            if not self.client.is_connected:
+                logger.error("❌ Pyrogram client НЕ подключён!")
+                return
+
+            logger.info("✅ Pyrogram client подключён и готов получать updates")
+            logger.info("🔄 Real-time мониторинг активен, ожидание сигнала остановки...")
+
+            # Цикл с проверкой соединения каждые 30 секунд
+            while not stop_event.is_set():
+                try:
+                    # Ждём 30 секунд или пока не придёт сигнал остановки
+                    await asyncio.wait_for(stop_event.wait(), timeout=30.0)
+                    # Если stop_event сработал - выходим
+                    break
+                except asyncio.TimeoutError:
+                    # Таймаут - проверяем соединение
+                    if not self.client.is_connected:
+                        logger.warning("⚠️  Соединение потеряно! Попытка переподключения...")
+                        try:
+                            # Пробуем переподключиться
+                            await self.client.stop()
+                            await asyncio.sleep(2)  # Небольшая пауза
+                            await self.client.start()
+                            logger.info("✅ Переподключение успешно!")
+
+                            # Перезагружаем диалоги в кэш
+                            logger.info("Перезагрузка диалогов в кэш...")
+                            async for dialog in self.client.get_dialogs(limit=100):
+                                pass
+                            logger.info("Диалоги перезагружены")
+                        except Exception as reconnect_error:
+                            logger.error(f"❌ Ошибка переподключения: {reconnect_error}")
+                            # Ждём перед следующей попыткой
+                            await asyncio.sleep(10)
+                    else:
+                        # Соединение в порядке
+                        logger.debug("✓ Соединение активно")
+
+            logger.info("Получен сигнал остановки парсера")
+
+        except asyncio.CancelledError:
+            logger.info("run_until_stopped отменён (CancelledError)")
+            raise
+        except Exception as e:
+            logger.error(f"Ошибка в run_until_stopped: {e}")
+            import traceback
+            logger.error(traceback.format_exc())

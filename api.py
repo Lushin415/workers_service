@@ -3,6 +3,7 @@ FastAPI REST API для Workers Service
 """
 import json
 import uuid
+import asyncio
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
@@ -22,6 +23,8 @@ from models_db import Task
 from db_service import DBService
 from state_manager import state_manager
 from tasks import start_monitoring_task
+from blacklist_service import BlacklistService
+from callback_handler import CallbackHandler
 
 
 # Настройка логирования
@@ -37,12 +40,104 @@ app = FastAPI(
 # Сервис БД
 db_service = DBService(db_path=config.DB_PATH)
 
+# Сервис черного списка (инициализируется при startup)
+blacklist_service: BlacklistService = None
+
+# Обработчик callback-кнопок (инициализируется при startup)
+callback_handler: CallbackHandler = None
+
+# Фоновая задача auto-cleanup
+cleanup_task = None
+
+
+async def cleanup_old_items_periodically():
+    """
+    Фоновая задача для автоматической очистки старых записей
+
+    Запускается раз в сутки и удаляет объявления старше 30 дней.
+    Предотвращает бесконечный рост БД в production.
+    """
+    while True:
+        try:
+            # Ждём 24 часа (86400 секунд)
+            await asyncio.sleep(86400)
+
+            # Очищаем записи старше 30 дней
+            deleted_count = await db_service.cleanup_old_items(days=30)
+
+            if deleted_count > 0:
+                logger.info(f"✅ Auto-cleanup: удалено {deleted_count} записей старше 30 дней")
+
+            # Логируем статистику БД
+            stats = await db_service.get_db_stats()
+            logger.info(
+                f"📊 Статистика БД: "
+                f"задач={stats['tasks_count']}, "
+                f"объявлений={stats['found_items_count']}, "
+                f"кеш ЧС={stats['blacklist_cache_count']}"
+            )
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка в фоновой задаче cleanup: {e}")
+            # Продолжаем работу даже при ошибке
+            await asyncio.sleep(3600)  # Повтор через 1 час при ошибке
+
 
 @app.on_event("startup")
 async def startup_event():
     """Инициализация при запуске"""
+    global blacklist_service, callback_handler, cleanup_task
+
+    # Инициализация БД
     await db_service.init_db()
+
+    # Инициализация сервиса черного списка (без запуска клиента!)
+    # Используем ОТДЕЛЬНУЮ сессию чтобы не конфликтовать с основным парсером
+    blacklist_service = BlacklistService(
+        api_id=config.API_ID,
+        api_hash=config.API_HASH,
+        session_name=config.BLACKLIST_SESSION_PATH,
+        db_service=db_service
+    )
+    logger.info(f"BlacklistService инициализирован (сессия: {config.BLACKLIST_SESSION_PATH})")
+
+    # Инициализация обработчика callback-кнопок
+    if config.BOT_TOKEN:
+        callback_handler = CallbackHandler(
+            bot_token=config.BOT_TOKEN,
+            blacklist_service=blacklist_service,
+            db_service=db_service
+        )
+        callback_handler.start_polling()
+        logger.info("Callback handler запущен")
+    else:
+        logger.warning("BOT_TOKEN не задан, callback handler не запущен")
+
+    # Запускаем фоновую задачу auto-cleanup (раз в сутки)
+    cleanup_task = asyncio.create_task(cleanup_old_items_periodically())
+    logger.info("🧹 Auto-cleanup задача запущена (удаление записей старше 30 дней раз в сутки)")
+
     logger.info("Workers Service запущен на порту 8002")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Очистка при остановке"""
+    global callback_handler, cleanup_task
+
+    # Останавливаем callback handler
+    if callback_handler:
+        callback_handler.stop_polling()
+
+    # Останавливаем фоновую задачу cleanup
+    if cleanup_task and not cleanup_task.done():
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            logger.info("🧹 Auto-cleanup задача остановлена")
+
+    logger.info("Workers Service остановлен")
 
 
 @app.get("/")
@@ -72,6 +167,10 @@ async def start_monitoring(request: StartMonitoringRequest):
         # Генерируем task_id
         task_id = str(uuid.uuid4())
 
+        # Определяем пути к сессиям (из запроса или fallback на конфиг)
+        session_path = request.session_path or config.SESSION_PATH
+        blacklist_session_path = request.blacklist_session_path or config.BLACKLIST_SESSION_PATH
+
         # Сохраняем задачу в БД
         task = Task(
             task_id=task_id,
@@ -85,10 +184,11 @@ async def start_monitoring(request: StartMonitoringRequest):
                 'max_price': request.filters.max_price,
                 'shk_filter': request.filters.shk_filter
             }),
-            notification_bot_token=request.notification_bot_token,
             notification_chat_id=request.notification_chat_id,
             status='pending',
-            created_at=datetime.utcnow().isoformat()
+            created_at=datetime.utcnow().isoformat(),
+            session_path=session_path,
+            blacklist_session_path=blacklist_session_path
         )
 
         await db_service.create_task(task)
@@ -106,11 +206,11 @@ async def start_monitoring(request: StartMonitoringRequest):
                 'max_price': request.filters.max_price,
                 'shk_filter': request.filters.shk_filter
             },
-            api_id=request.api_id,
-            api_hash=request.api_hash,
-            notification_bot_token=request.notification_bot_token,
+            api_id=request.api_id or config.API_ID,
+            api_hash=request.api_hash or config.API_HASH,
             notification_chat_id=request.notification_chat_id,
-            parse_history_days=request.parse_history_days
+            parse_history_days=request.parse_history_days,
+            session_path=session_path
         )
 
         return StartMonitoringResponse(
@@ -241,12 +341,11 @@ async def get_found_items(task_id: str, limit: int = 50):
 
 
 @app.post("/workers/{item_id}/check-blacklist", response_model=CheckBlacklistResponse)
-async def check_blacklist(item_id: int, task_id: str):
+async def check_blacklist_by_item(item_id: int, task_id: str):
     """
-    Отправить на проверку в Черный Список (заглушка)
+    Проверить автора объявления в Черном Списке
 
-    ВАЖНО: Это заглушка. Сервис blacklist_service будет создан позже.
-    Сейчас просто возвращает {"is_blacklisted": false}.
+    Парсит @Blacklist_pvz в реальном времени и ищет совпадение по ID или username.
     """
     try:
         # Проверяем существование объявления
@@ -255,20 +354,287 @@ async def check_blacklist(item_id: int, task_id: str):
         if not item:
             raise HTTPException(status_code=404, detail="Объявление не найдено")
 
-        # Заглушка - всегда возвращаем False
+        # Проверяем наличие author_id или author_username
+        if not item.author_id and not item.author_username:
+            return CheckBlacklistResponse(
+                item_id=item_id,
+                check_status='error',
+                result={
+                    'found': False,
+                    'error': 'Telegram User ID и username автора неизвестны'
+                }
+            )
+
+        # Получаем blacklist_session_path из задачи
+        bl_session = await db_service.get_blacklist_session_by_item(item_id)
+
+        # Ищем в черном списке (в реальном времени, с сессией пользователя)
+        result = await blacklist_service.search_in_blacklist(
+            user_id=item.author_id,
+            username=item.author_username,
+            session_name=bl_session
+        )
+
         return CheckBlacklistResponse(
             item_id=item_id,
             check_status='completed',
-            result={
-                'is_blacklisted': False,
-                'messages': []
-            }
+            result=result
         )
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Ошибка проверки черного списка для объявления {item_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/blacklist/check")
+async def check_in_blacklist(username: str, blacklist_session_path: str = None):
+    """
+    Проверить пользователя в черном списке по username
+
+    Второй сценарий: пользователь вводит @username и получает результат.
+    Поиск идёт по ВСЕМ активным чатам ЧС.
+
+    Args:
+        username: Telegram username (с или без @)
+        blacklist_session_path: путь к сессии ЧС (опционально, fallback на конфиг)
+    """
+    try:
+        if not blacklist_service:
+            raise HTTPException(status_code=503, detail="Сервис черного списка не инициализирован")
+
+        # Ищем в черном списке (в реальном времени по всем чатам)
+        result = await blacklist_service.search_in_blacklist(
+            username=username,
+            session_name=blacklist_session_path
+        )
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Ошибка проверки username {username} в черном списке: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ========== Управление чатами черного списка ==========
+
+@app.get("/blacklist/chats")
+async def get_blacklist_chats():
+    """
+    Получить список чатов черного списка
+
+    Возвращает все чаты (активные и неактивные) с информацией.
+    """
+    try:
+        chats = await db_service.get_blacklist_chats_info()
+        return {
+            "chats": chats,
+            "total": len(chats),
+            "active": len([c for c in chats if c.get("is_active")])
+        }
+
+    except Exception as e:
+        logger.error(f"Ошибка получения списка чатов ЧС: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/blacklist/chats/add")
+async def add_blacklist_chat(
+    chat_username: str,
+    chat_title: str = None,
+    topic_id: int = None,
+    topic_name: str = None,
+):
+    """
+    Добавить чат в список черного списка
+
+    Args:
+        chat_username: username чата (например @Blacklist_pvz_2)
+        chat_title: название чата (опционально)
+        topic_id: ID топика форума (опционально, None = весь чат)
+        topic_name: название топика (опционально)
+    """
+    try:
+        result = await db_service.add_blacklist_chat(
+            chat_username, chat_title,
+            topic_id=topic_id, topic_name=topic_name,
+        )
+
+        topic_info = f" (топик: {topic_name})" if topic_name else ""
+        if result:
+            return {
+                "status": "success",
+                "message": f"Чат {chat_username}{topic_info} добавлен в список ЧС"
+            }
+        else:
+            return {
+                "status": "exists",
+                "message": f"Чат {chat_username}{topic_info} уже существует"
+            }
+
+    except Exception as e:
+        logger.error(f"Ошибка добавления чата ЧС: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/blacklist/chats/remove")
+async def remove_blacklist_chat(chat_username: str, topic_id: int = None):
+    """
+    Удалить (деактивировать) чат из списка черного списка
+
+    Args:
+        chat_username: username чата
+        topic_id: ID топика (None = запись без топика)
+    """
+    try:
+        result = await db_service.remove_blacklist_chat(chat_username, topic_id=topic_id)
+
+        if result:
+            return {
+                "status": "success",
+                "message": f"Чат {chat_username} удалён из списка ЧС"
+            }
+        else:
+            raise HTTPException(status_code=404, detail=f"Чат {chat_username} не найден")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Ошибка удаления чата ЧС: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/blacklist/chats/topics")
+async def get_chat_topics(chat_username: str, blacklist_session_path: str = None):
+    """
+    Получить список топиков форума (если чат является форумом)
+
+    Args:
+        chat_username: username чата (например @spbpvz)
+        blacklist_session_path: путь к сессии ЧС (опционально)
+
+    Returns:
+        is_forum: bool, topics: [{id, name}]
+    """
+    from pyrogram import Client
+    from pyrogram.raw.functions.channels import GetForumTopics
+    from pyrogram.raw.types import InputPeerChannel
+
+    effective_session = blacklist_session_path or config.BLACKLIST_SESSION_PATH
+
+    client = Client(
+        name=effective_session,
+        api_id=config.API_ID,
+        api_hash=config.API_HASH,
+    )
+
+    try:
+        await client.start()
+
+        chat = await client.get_chat(chat_username)
+        chat_id = chat.id
+        chat_title = chat.title
+
+        # Пробуем получить топики
+        peer = await client.resolve_peer(chat_id)
+
+        if not isinstance(peer, InputPeerChannel):
+            return {
+                "is_forum": False,
+                "chat_title": chat_title,
+                "topics": []
+            }
+
+        result = await client.invoke(
+            GetForumTopics(
+                channel=peer,
+                offset_date=0,
+                offset_id=0,
+                offset_topic=0,
+                limit=100
+            )
+        )
+
+        topics = []
+        if hasattr(result, 'topics'):
+            for topic in result.topics:
+                topics.append({
+                    "id": topic.id,
+                    "name": topic.title
+                })
+
+        return {
+            "is_forum": len(topics) > 0,
+            "chat_title": chat_title,
+            "topics": topics
+        }
+
+    except Exception as e:
+        error_str = str(e)
+        if "CHANNEL_FORUM_MISSING" in error_str:
+            return {
+                "is_forum": False,
+                "chat_title": chat_username,
+                "topics": []
+            }
+        logger.error(f"Ошибка получения топиков чата {chat_username}: {e}")
+        raise HTTPException(status_code=500, detail=error_str)
+
+    finally:
+        await client.stop()
+
+
+# ========== Admin Endpoints ==========
+
+@app.get("/admin/stats")
+async def get_db_stats():
+    """
+    Получить статистику БД (для мониторинга)
+
+    Returns:
+        Словарь с количеством записей, датами, размером БД
+    """
+    try:
+        stats = await db_service.get_db_stats()
+        return {
+            "status": "success",
+            "stats": stats
+        }
+    except Exception as e:
+        logger.error(f"Ошибка получения статистики БД: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/admin/cleanup")
+async def manual_cleanup(days: int = 30):
+    """
+    Ручная очистка старых записей
+
+    Args:
+        days: удалить записи старше N дней (по умолчанию 30)
+
+    Returns:
+        Количество удалённых записей
+    """
+    try:
+        if days < 1 or days > 365:
+            raise HTTPException(status_code=400, detail="days должно быть от 1 до 365")
+
+        deleted_count = await db_service.cleanup_old_items(days=days)
+
+        return {
+            "status": "success",
+            "deleted_count": deleted_count,
+            "message": f"Удалено записей старше {days} дней: {deleted_count}"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Ошибка ручной очистки БД: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -1,6 +1,7 @@
 """
 Управление состоянием задач мониторинга
 """
+import asyncio
 import threading
 from typing import Dict, Optional
 from datetime import datetime
@@ -14,14 +15,14 @@ class StateManager:
         self._tasks: Dict[str, Dict] = {}
         self._lock = threading.Lock()
 
-    def create_task(self, task_id: str, mode: str) -> threading.Event:
+    def create_task(self, task_id: str, mode: str) -> asyncio.Event:
         """
         Создать новую задачу
 
         Returns:
-            threading.Event для остановки задачи
+            asyncio.Event для остановки задачи
         """
-        stop_event = threading.Event()
+        stop_event = asyncio.Event()
 
         with self._lock:
             self._tasks[task_id] = {
@@ -29,6 +30,7 @@ class StateManager:
                 'mode': mode,
                 'status': 'pending',
                 'stop_event': stop_event,
+                'asyncio_task': None,
                 'stats': {
                     'total_messages_scanned': 0,
                     'items_found': 0,
@@ -39,6 +41,12 @@ class StateManager:
 
         logger.info(f"Задача {task_id} создана в state_manager")
         return stop_event
+
+    def set_asyncio_task(self, task_id: str, asyncio_task: asyncio.Task):
+        """Сохранить ссылку на asyncio.Task"""
+        with self._lock:
+            if task_id in self._tasks:
+                self._tasks[task_id]['asyncio_task'] = asyncio_task
 
     def get_task(self, task_id: str) -> Optional[Dict]:
         """Получить информацию о задаче"""
@@ -83,6 +91,10 @@ class StateManager:
             if task_id in self._tasks:
                 self._tasks[task_id]['stop_event'].set()
                 self._tasks[task_id]['status'] = 'stopped'
+                # Отменяем asyncio task если есть
+                asyncio_task = self._tasks[task_id].get('asyncio_task')
+                if asyncio_task and not asyncio_task.done():
+                    asyncio_task.cancel()
                 logger.info(f"Задача {task_id} остановлена")
 
     def remove_task(self, task_id: str):

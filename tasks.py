@@ -2,7 +2,6 @@
 Фоновые задачи мониторинга
 """
 import asyncio
-import threading
 from datetime import datetime
 from typing import List
 from loguru import logger
@@ -30,9 +29,9 @@ class MonitoringTask:
         filters_dict: dict,
         api_id: int,
         api_hash: str,
-        notification_bot_token: str,
         notification_chat_id: int,
-        parse_history_days: int
+        parse_history_days: int,
+        session_path: str = None
     ):
         self.task_id = task_id
         self.user_id = user_id
@@ -40,9 +39,9 @@ class MonitoringTask:
         self.chats = chats
         self.api_id = api_id
         self.api_hash = api_hash
-        self.notification_bot_token = notification_bot_token
         self.notification_chat_id = notification_chat_id
         self.parse_history_days = parse_history_days
+        self.session_path = session_path or config.SESSION_PATH
 
         # Создаем фильтр
         self.item_filter = ItemFilter(
@@ -56,7 +55,8 @@ class MonitoringTask:
         # Сервисы
         self.db = DBService(db_path=config.DB_PATH)
         self.parser = None
-        self.notifier = TelegramNotifier(notification_bot_token, notification_chat_id)
+        # Используем общий BOT_TOKEN из конфига для всех уведомлений
+        self.notifier = TelegramNotifier(config.BOT_TOKEN, notification_chat_id)
 
         # Кэш топиков: {chat_username: {topic_id: topic_name}}
         self.topics_cache = {}
@@ -83,21 +83,26 @@ class MonitoringTask:
             extracted = MessageExtractor.extract(message_text, message_date)
 
             if not extracted:
+                logger.debug(f"[FILTER] Сообщение из {chat_name} НЕ распознано (нет даты/цены/типа)")
                 return
 
             # Проверяем тип (должен соответствовать режиму)
             if extracted['type'] != self.mode:
+                logger.debug(f"[FILTER] Сообщение из {chat_name} пропущено: тип '{extracted['type']}' != режим '{self.mode}'")
                 return
 
             # Применяем фильтры
             if not self.item_filter.matches(extracted):
+                logger.debug(f"[FILTER] Сообщение из {chat_name} НЕ прошло фильтры (дата/цена/ШК)")
                 return
 
             # Формируем данные для сохранения
             author_username = message.from_user.username if message.from_user else None
             author_full_name = None
+            author_id = None  # Telegram User ID (не меняется, в отличие от username)
             if message.from_user:
                 author_full_name = f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip()
+                author_id = message.from_user.id  # Сохраняем Telegram User ID
 
             # Извлекаем topic_id и topic_name (для форумов/супергрупп)
             topic_id = None
@@ -196,6 +201,7 @@ class MonitoringTask:
                 mode=self.mode,
                 author_username=author_username,
                 author_full_name=author_full_name,
+                author_id=author_id,  # Telegram User ID (для проверки в ЧС)
                 date=extracted['date'],
                 price=extracted['price'],
                 shk=extracted.get('shk'),
@@ -233,6 +239,7 @@ class MonitoringTask:
                     'topic_name': topic_name,  # Название топика (МСК - Ozon и т.д.)
                     'author_username': author_username,
                     'author_full_name': author_full_name,
+                    'author_id': author_id,  # Telegram User ID (для проверки в ЧС)
                     'chat_name': chat_name,
                     'message_link': message_link,
                     'message_text': message_text
@@ -249,16 +256,19 @@ class MonitoringTask:
             logger.error(f"Ошибка обработки сообщения: {e}")
 
     async def run_async(self):
-        """Асинхронная часть задачи"""
+        """
+        Асинхронная задача мониторинга.
+        Запускается через asyncio.create_task() на event loop FastAPI.
+        """
         try:
             # Инициализируем БД
             await self.db.init_db()
 
-            # Создаем парсер (используем общую сессию для всех задач)
+            # Создаем парсер (сессия из запроса или из конфига)
             self.parser = TelegramParser(
                 api_id=self.api_id,
                 api_hash=self.api_hash,
-                session_name=config.SESSION_PATH  # Путь к сессии (из .env)
+                session_name=self.session_path
             )
 
             # Запускаем клиент
@@ -300,8 +310,12 @@ class MonitoringTask:
                 # Ждем сигнала остановки
                 await self.parser.run_until_stopped(self.stop_event)
 
+        except asyncio.CancelledError:
+            logger.info(f"Задача {self.task_id} отменена (CancelledError)")
         except Exception as e:
             logger.error(f"Ошибка в задаче {self.task_id}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
         finally:
             # Останавливаем парсер
             if self.parser:
@@ -310,17 +324,6 @@ class MonitoringTask:
             # Обновляем статус
             state_manager.update_status(self.task_id, "stopped")
             logger.info(f"Задача {self.task_id} завершена")
-
-    def run(self):
-        """Запустить задачу в отдельном потоке"""
-        # Создаем новый event loop для этого потока
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        try:
-            loop.run_until_complete(self.run_async())
-        finally:
-            loop.close()
 
 
 def start_monitoring_task(
@@ -331,12 +334,16 @@ def start_monitoring_task(
     filters_dict: dict,
     api_id: int,
     api_hash: str,
-    notification_bot_token: str,
     notification_chat_id: int,
-    parse_history_days: int
+    parse_history_days: int,
+    session_path: str = None
 ):
     """
-    Запустить задачу мониторинга в фоновом потоке
+    Запустить задачу мониторинга как asyncio.Task на event loop FastAPI.
+
+    Вызывать из async контекста (FastAPI endpoint).
+    Pyrogram работает на том же event loop, что и FastAPI — это необходимо
+    для корректного получения real-time updates через MTProto.
 
     Args:
         task_id: ID задачи
@@ -346,9 +353,9 @@ def start_monitoring_task(
         filters_dict: словарь с фильтрами
         api_id: Telegram API ID
         api_hash: Telegram API Hash
-        notification_bot_token: токен бота для уведомлений
-        notification_chat_id: ID чата для уведомлений
+        notification_chat_id: ID чата для уведомлений (общий бот из config.BOT_TOKEN)
         parse_history_days: количество дней истории
+        session_path: путь к Pyrogram сессии (из запроса ParserHub)
     """
     task = MonitoringTask(
         task_id=task_id,
@@ -358,13 +365,13 @@ def start_monitoring_task(
         filters_dict=filters_dict,
         api_id=api_id,
         api_hash=api_hash,
-        notification_bot_token=notification_bot_token,
         notification_chat_id=notification_chat_id,
-        parse_history_days=parse_history_days
+        parse_history_days=parse_history_days,
+        session_path=session_path
     )
 
-    # Запускаем в отдельном потоке
-    thread = threading.Thread(target=task.run, daemon=True)
-    thread.start()
+    # Запускаем как asyncio Task на текущем event loop (FastAPI/uvicorn)
+    asyncio_task = asyncio.create_task(task.run_async())
+    state_manager.set_asyncio_task(task_id, asyncio_task)
 
-    logger.info(f"Фоновая задача {task_id} запущена в потоке")
+    logger.info(f"Фоновая задача {task_id} запущена как asyncio.Task на event loop FastAPI")

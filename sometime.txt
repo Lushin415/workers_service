@@ -43,7 +43,31 @@ curl -X POST http://localhost:8002/workers/start \
       },
       "notification_bot_token": "8374925023:AAG9QwKAfXnwDZ4ZvtjP6zaoaqkEXeZn6p8",
       "notification_chat_id": 338908929,
-      "parse_history_days": 3,
+      "parse_history_days": 1,
       "api_id": 31834015,
       "api_hash": "7435e77a18431b9d3ac0c3bc7ee8bfc8"
     }'
+
+
+    ● Всё работает:
+
+  1. ✅ Добавление чата — POST /blacklist/chats/add?chat_username=@chat_name                                                                                      ─
+  2. ✅ Список чатов — GET /blacklist/chats
+  3. ✅ Удаление чата — POST /blacklist/chats/remove?chat_username=@chat_name                                                                                     ─
+  4. ✅ Поиск по всем чатам — теперь показывает в каком чатеtнайден ("chat":"@Blacklist_pvz")
+
+  Итоговая структура API для управления чатами ЧС:
+
+  # Получить список чатов ЧС
+  GET /blacklist/chats
+
+  # Добавить чат
+  POST /blacklist/chats/add?chat_username=@Blacklist_pvz_2&chat_title=Название
+
+  # Удалить (деактивировать) чат
+  POST /blacklist/chats/remove?chat_username=@Blacklist_pvz_2
+
+  # Проверить пользователя (поиск по ВСЕМ активным чатам)
+  POST /blacklist/check?username=@username
+
+  Для бота ParserHub нужно будет вызывать эти endpoints для добавления/удаления чатов ЧС.

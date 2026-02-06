@@ -36,6 +36,5 @@ data/
 !README.md
 
 # Other
-.env
 sometime.txt
 config.example.json

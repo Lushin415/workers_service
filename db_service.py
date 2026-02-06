@@ -6,7 +6,7 @@ import json
 from typing import List, Optional
 from datetime import datetime
 from loguru import logger
-from models_db import Task, FoundItem
+from models_db import Task, FoundItem, BlacklistRecord
 
 
 class DBService:
@@ -26,11 +26,12 @@ class DBService:
                     mode TEXT NOT NULL,
                     chats TEXT NOT NULL,
                     filters TEXT NOT NULL,
-                    notification_bot_token TEXT NOT NULL,
                     notification_chat_id INTEGER NOT NULL,
                     status TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    stopped_at TEXT
+                    stopped_at TEXT,
+                    session_path TEXT,
+                    blacklist_session_path TEXT
                 )
             """)
 
@@ -95,6 +96,87 @@ class DBService:
             except:
                 pass
 
+            # Миграция: добавляем author_id (Telegram User ID)
+            try:
+                await db.execute("ALTER TABLE found_items ADD COLUMN author_id INTEGER")
+                logger.info("Добавлен столбец author_id")
+            except:
+                pass  # Столбец уже существует
+
+            # Миграция: добавляем session_path и blacklist_session_path в tasks
+            try:
+                await db.execute("ALTER TABLE tasks ADD COLUMN session_path TEXT")
+                logger.info("Добавлен столбец session_path в tasks")
+            except:
+                pass
+
+            try:
+                await db.execute("ALTER TABLE tasks ADD COLUMN blacklist_session_path TEXT")
+                logger.info("Добавлен столбец blacklist_session_path в tasks")
+            except:
+                pass
+
+            # Таблица кеша черного списка
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS blacklist_cache (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    telegram_user_id INTEGER NOT NULL UNIQUE,
+                    username TEXT,
+                    full_name TEXT,
+                    phone TEXT,
+                    role TEXT,
+                    message_link TEXT NOT NULL,
+                    message_id INTEGER,
+                    parsed_at TEXT NOT NULL
+                )
+            """)
+
+            # Индекс для быстрого поиска по telegram_user_id
+            await db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_blacklist_user_id
+                ON blacklist_cache(telegram_user_id)
+            """)
+
+            # Таблица чатов черного списка (для динамического управления)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS blacklist_chats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_username TEXT NOT NULL,
+                    chat_title TEXT,
+                    added_at TEXT NOT NULL,
+                    is_active BOOLEAN DEFAULT 1,
+                    topic_id INTEGER,
+                    topic_name TEXT,
+                    UNIQUE(chat_username, topic_id)
+                )
+            """)
+
+            # Миграция: добавляем topic_id и topic_name в blacklist_chats
+            try:
+                await db.execute("ALTER TABLE blacklist_chats ADD COLUMN topic_id INTEGER")
+                logger.info("Добавлен столбец topic_id в blacklist_chats")
+            except:
+                pass
+
+            try:
+                await db.execute("ALTER TABLE blacklist_chats ADD COLUMN topic_name TEXT")
+                logger.info("Добавлен столбец topic_name в blacklist_chats")
+            except:
+                pass
+
+            # Создаём составной уникальный индекс (chat_username + topic_id)
+            # DROP старого UNIQUE constraint нельзя в SQLite, но новые записи проверяются через INSERT логику
+            await db.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_blacklist_chat_topic
+                ON blacklist_chats(chat_username, COALESCE(topic_id, 0))
+            """)
+
+            # Добавляем дефолтный чат если таблица пустая
+            await db.execute("""
+                INSERT OR IGNORE INTO blacklist_chats (chat_username, chat_title, added_at, is_active)
+                VALUES ('@Blacklist_pvz', 'Чёрный Список ПВЗ', datetime('now'), 1)
+            """)
+
             await db.commit()
             logger.info("База данных инициализирована")
 
@@ -103,13 +185,15 @@ class DBService:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
                 INSERT INTO tasks
-                (task_id, user_id, mode, chats, filters, notification_bot_token,
-                 notification_chat_id, status, created_at, stopped_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (task_id, user_id, mode, chats, filters,
+                 notification_chat_id, status, created_at, stopped_at,
+                 session_path, blacklist_session_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 task.task_id, task.user_id, task.mode, task.chats, task.filters,
-                task.notification_bot_token, task.notification_chat_id,
-                task.status, task.created_at, task.stopped_at
+                task.notification_chat_id,
+                task.status, task.created_at, task.stopped_at,
+                task.session_path, task.blacklist_session_path
             ))
             await db.commit()
             logger.info(f"Задача {task.task_id} создана")
@@ -293,14 +377,14 @@ class DBService:
             try:
                 cursor = await db.execute("""
                     INSERT INTO found_items
-                    (task_id, mode, author_username, author_full_name, date, price,
+                    (task_id, mode, author_username, author_full_name, author_id, date, price,
                      shk, location, city, metro_station, district,
                      message_text, message_link, chat_name,
                      message_date, found_at, notified, content_hash, topic_id, topic_name)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     item.task_id, item.mode, item.author_username, item.author_full_name,
-                    item.date, item.price, item.shk, item.location,
+                    item.author_id, item.date, item.price, item.shk, item.location,
                     item.city, item.metro_station, item.district,
                     item.message_text, item.message_link, item.chat_name, item.message_date,
                     item.found_at, item.notified, item.content_hash, item.topic_id, item.topic_name
@@ -351,3 +435,337 @@ class DBService:
             ) as cursor:
                 row = await cursor.fetchone()
                 return row[0] if row else 0
+
+    # ========== Методы для работы с черным списком ==========
+
+    async def add_blacklist_record(self, record: BlacklistRecord) -> Optional[int]:
+        """
+        Добавить или обновить запись в кеше черного списка
+
+        Если запись с таким telegram_user_id уже есть — обновляем её.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            try:
+                cursor = await db.execute("""
+                    INSERT INTO blacklist_cache
+                    (telegram_user_id, username, full_name, phone, role, message_link, message_id, parsed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(telegram_user_id) DO UPDATE SET
+                        username = excluded.username,
+                        full_name = excluded.full_name,
+                        phone = excluded.phone,
+                        role = excluded.role,
+                        message_link = excluded.message_link,
+                        message_id = excluded.message_id,
+                        parsed_at = excluded.parsed_at
+                """, (
+                    record.telegram_user_id, record.username, record.full_name,
+                    record.phone, record.role, record.message_link,
+                    record.message_id, record.parsed_at
+                ))
+                await db.commit()
+                return cursor.lastrowid
+            except Exception as e:
+                logger.error(f"Ошибка добавления записи в blacklist_cache: {e}")
+                return None
+
+    async def find_in_blacklist(self, telegram_user_id: int) -> Optional[BlacklistRecord]:
+        """
+        Поиск пользователя в черном списке по Telegram User ID
+
+        Args:
+            telegram_user_id: Telegram User ID для поиска
+
+        Returns:
+            BlacklistRecord если найден, иначе None
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM blacklist_cache WHERE telegram_user_id = ?",
+                (telegram_user_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    return BlacklistRecord(**dict(row))
+                return None
+
+    async def clear_blacklist_cache(self):
+        """Очистить кеш черного списка"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("DELETE FROM blacklist_cache")
+            await db.commit()
+            logger.info("Кеш черного списка очищен")
+
+    async def get_blacklist_stats(self) -> dict:
+        """
+        Получить статистику кеша черного списка
+
+        Returns:
+            Словарь с количеством записей и датой последнего обновления
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            # Общее количество записей
+            async with db.execute("SELECT COUNT(*) FROM blacklist_cache") as cursor:
+                row = await cursor.fetchone()
+                total_count = row[0] if row else 0
+
+            # Количество по ролям
+            async with db.execute("""
+                SELECT role, COUNT(*) FROM blacklist_cache GROUP BY role
+            """) as cursor:
+                rows = await cursor.fetchall()
+                by_role = {row[0]: row[1] for row in rows}
+
+            # Последнее обновление
+            async with db.execute("""
+                SELECT MAX(parsed_at) FROM blacklist_cache
+            """) as cursor:
+                row = await cursor.fetchone()
+                last_update = row[0] if row and row[0] else None
+
+            return {
+                "total_records": total_count,
+                "workers": by_role.get("worker", 0),
+                "employers": by_role.get("employer", 0),
+                "last_update": last_update
+            }
+
+    async def get_author_id_by_item(self, item_id: int) -> Optional[int]:
+        """
+        Получить author_id по ID объявления
+
+        Args:
+            item_id: ID записи в found_items
+
+        Returns:
+            author_id (Telegram User ID) или None
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT author_id FROM found_items WHERE id = ?", (item_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if row and row[0]:
+                    return row[0]
+                return None
+
+    async def get_blacklist_session_by_item(self, item_id: int) -> Optional[str]:
+        """
+        Получить blacklist_session_path по ID объявления
+
+        Ищет task_id по item_id, затем session_path по task_id.
+
+        Args:
+            item_id: ID записи в found_items
+
+        Returns:
+            blacklist_session_path или None
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("""
+                SELECT t.blacklist_session_path
+                FROM found_items fi
+                JOIN tasks t ON fi.task_id = t.task_id
+                WHERE fi.id = ?
+            """, (item_id,)) as cursor:
+                row = await cursor.fetchone()
+                if row and row[0]:
+                    return row[0]
+                return None
+
+    # ========== Методы для управления чатами черного списка ==========
+
+    async def get_blacklist_chats(self, active_only: bool = True) -> List[dict]:
+        """
+        Получить список чатов черного списка
+
+        Args:
+            active_only: только активные чаты
+
+        Returns:
+            Список словарей с chat_username, topic_id, topic_name
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            if active_only:
+                query = "SELECT chat_username, topic_id, topic_name FROM blacklist_chats WHERE is_active = 1"
+            else:
+                query = "SELECT chat_username, topic_id, topic_name FROM blacklist_chats"
+
+            async with db.execute(query) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+
+    async def add_blacklist_chat(
+        self,
+        chat_username: str,
+        chat_title: Optional[str] = None,
+        topic_id: Optional[int] = None,
+        topic_name: Optional[str] = None,
+    ) -> bool:
+        """
+        Добавить чат в список черного списка
+
+        Args:
+            chat_username: username чата (например @Blacklist_pvz)
+            chat_title: название чата (опционально)
+            topic_id: ID топика форума (опционально, None = весь чат)
+            topic_name: название топика (опционально)
+
+        Returns:
+            True если добавлен, False если уже существует
+        """
+        # Нормализуем username
+        if not chat_username.startswith("@"):
+            chat_username = f"@{chat_username}"
+
+        async with aiosqlite.connect(self.db_path) as db:
+            try:
+                await db.execute("""
+                    INSERT INTO blacklist_chats (chat_username, chat_title, added_at, is_active, topic_id, topic_name)
+                    VALUES (?, ?, datetime('now'), 1, ?, ?)
+                """, (chat_username, chat_title, topic_id, topic_name))
+                await db.commit()
+                topic_info = f" (топик: {topic_name})" if topic_name else ""
+                logger.info(f"Добавлен чат ЧС: {chat_username}{topic_info}")
+                return True
+            except aiosqlite.IntegrityError:
+                # Чат уже существует - активируем его
+                if topic_id is not None:
+                    await db.execute("""
+                        UPDATE blacklist_chats SET is_active = 1 WHERE chat_username = ? AND topic_id = ?
+                    """, (chat_username, topic_id))
+                else:
+                    await db.execute("""
+                        UPDATE blacklist_chats SET is_active = 1 WHERE chat_username = ? AND topic_id IS NULL
+                    """, (chat_username,))
+                await db.commit()
+                logger.info(f"Чат ЧС активирован: {chat_username}")
+                return True
+
+    async def remove_blacklist_chat(self, chat_username: str, topic_id: Optional[int] = None) -> bool:
+        """
+        Удалить (деактивировать) чат из списка черного списка
+
+        Args:
+            chat_username: username чата
+            topic_id: ID топика (None = запись без топика)
+
+        Returns:
+            True если удалён, False если не найден
+        """
+        if not chat_username.startswith("@"):
+            chat_username = f"@{chat_username}"
+
+        async with aiosqlite.connect(self.db_path) as db:
+            if topic_id is not None:
+                cursor = await db.execute("""
+                    UPDATE blacklist_chats SET is_active = 0 WHERE chat_username = ? AND topic_id = ?
+                """, (chat_username, topic_id))
+            else:
+                cursor = await db.execute("""
+                    UPDATE blacklist_chats SET is_active = 0 WHERE chat_username = ? AND topic_id IS NULL
+                """, (chat_username,))
+            await db.commit()
+
+            if cursor.rowcount > 0:
+                logger.info(f"Чат ЧС деактивирован: {chat_username}")
+                return True
+            return False
+
+    async def get_blacklist_chats_info(self) -> List[dict]:
+        """
+        Получить полную информацию о чатах черного списка
+
+        Returns:
+            Список словарей с информацией о чатах
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("""
+                SELECT chat_username, chat_title, added_at, is_active, topic_id, topic_name
+                FROM blacklist_chats
+                ORDER BY added_at
+            """) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+
+    # ========== Cleanup методы ==========
+
+    async def cleanup_old_items(self, days: int = 30) -> int:
+        """
+        Удалить найденные объявления старше N дней
+
+        Используется для автоматической очистки БД от устаревших записей.
+        Запускается фоновой задачей раз в сутки.
+
+        Args:
+            days: количество дней (записи старше будут удалены)
+
+        Returns:
+            Количество удалённых записей
+        """
+        from datetime import datetime, timedelta
+
+        # Временная граница (записи старше этой даты удаляем)
+        threshold = (datetime.utcnow() - timedelta(days=days)).isoformat()
+
+        async with aiosqlite.connect(self.db_path) as db:
+            # Удаляем старые записи
+            cursor = await db.execute(
+                "DELETE FROM found_items WHERE found_at < ?",
+                (threshold,)
+            )
+            deleted_count = cursor.rowcount
+            await db.commit()
+
+            if deleted_count > 0:
+                logger.info(f"Auto-cleanup: удалено {deleted_count} записей старше {days} дней")
+            else:
+                logger.debug(f"Auto-cleanup: старых записей не найдено (>{days} дней)")
+
+            return deleted_count
+
+    async def get_db_stats(self) -> dict:
+        """
+        Получить статистику БД (для мониторинга)
+
+        Returns:
+            Словарь с количеством записей по таблицам
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            stats = {}
+
+            # Количество задач
+            async with db.execute("SELECT COUNT(*) FROM tasks") as cursor:
+                row = await cursor.fetchone()
+                stats['tasks_count'] = row[0] if row else 0
+
+            # Количество найденных объявлений
+            async with db.execute("SELECT COUNT(*) FROM found_items") as cursor:
+                row = await cursor.fetchone()
+                stats['found_items_count'] = row[0] if row else 0
+
+            # Количество в кеше ЧС
+            async with db.execute("SELECT COUNT(*) FROM blacklist_cache") as cursor:
+                row = await cursor.fetchone()
+                stats['blacklist_cache_count'] = row[0] if row else 0
+
+            # Самая старая запись в found_items
+            async with db.execute(
+                "SELECT MIN(found_at) FROM found_items"
+            ) as cursor:
+                row = await cursor.fetchone()
+                stats['oldest_found_item'] = row[0] if row and row[0] else None
+
+            # Самая новая запись
+            async with db.execute(
+                "SELECT MAX(found_at) FROM found_items"
+            ) as cursor:
+                row = await cursor.fetchone()
+                stats['newest_found_item'] = row[0] if row and row[0] else None
+
+            return stats
+
+

@@ -34,5 +34,10 @@ class Config:
     # Parsing
     PARSE_HISTORY_DAYS: int = int(os.getenv("PARSE_HISTORY_DAYS", "3"))
 
+    # Blacklist (Черный список) - поиск в реальном времени
+    BLACKLIST_CHAT: str = os.getenv("BLACKLIST_CHAT", "@Blacklist_pvz")
+    # Отдельная сессия для поиска в ЧС (чтобы не конфликтовать с основным парсером)
+    BLACKLIST_SESSION_PATH: str = os.getenv("BLACKLIST_SESSION_PATH", "blacklist_session")
+
 
 config = Config()

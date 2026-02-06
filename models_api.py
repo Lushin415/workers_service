@@ -21,11 +21,12 @@ class StartMonitoringRequest(BaseModel):
     mode: str = Field(..., pattern="^(worker|employer)$")
     chats: List[str]
     filters: Filters
-    api_id: int
-    api_hash: str
-    notification_bot_token: str
-    notification_chat_id: int
+    api_id: Optional[int] = None  # Опционально, fallback на config
+    api_hash: Optional[str] = None  # Опционально, fallback на config
+    notification_chat_id: int  # Chat ID для уведомлений (общий бот из config.BOT_TOKEN)
     parse_history_days: int = 14
+    session_path: Optional[str] = None  # Путь к Pyrogram сессии парсера (например /shared/sessions/338908929_parser)
+    blacklist_session_path: Optional[str] = None  # Путь к сессии для ЧС (например /shared/sessions/338908929_blacklist)
 
 
 class TaskStatusResponse(BaseModel):
@@ -73,7 +74,44 @@ class FoundItemsListResponse(BaseModel):
 
 
 class CheckBlacklistResponse(BaseModel):
-    """Ответ на проверку черного списка (заглушка)"""
+    """Ответ на проверку черного списка (заглушка для check-blacklist endpoint)"""
     item_id: int
     check_status: str
     result: dict
+
+
+# ========== Модели для Blacklist API ==========
+
+class BlacklistCheckRequest(BaseModel):
+    """Запрос на проверку пользователя в черном списке"""
+    user_id: int
+
+
+class BlacklistCheckResponse(BaseModel):
+    """Ответ на проверку пользователя в черном списке"""
+    is_blacklisted: bool
+    user_id: int
+    username: Optional[str] = None
+    full_name: Optional[str] = None
+    phone: Optional[str] = None
+    role: Optional[str] = None
+    message_link: Optional[str] = None
+    message: Optional[str] = None
+    cache_updated: Optional[str] = None
+
+
+class BlacklistRefreshResponse(BaseModel):
+    """Ответ на обновление кеша черного списка"""
+    status: str
+    records_updated: int
+    message: str
+
+
+class BlacklistStatsResponse(BaseModel):
+    """Статистика кеша черного списка"""
+    blacklist_chat: str
+    total_records: int
+    workers: int
+    employers: int
+    last_cache_update: Optional[str] = None
+    service_last_refresh: Optional[str] = None

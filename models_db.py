@@ -14,11 +14,12 @@ class Task:
     mode: str  # "worker" или "employer"
     chats: str  # JSON строка
     filters: str  # JSON строка
-    notification_bot_token: str
-    notification_chat_id: int
+    notification_chat_id: int  # Chat ID для уведомлений (общий бот из config.BOT_TOKEN)
     status: str  # "pending", "running", "stopped"
     created_at: str
     stopped_at: Optional[str] = None
+    session_path: Optional[str] = None  # Путь к Pyrogram сессии парсера
+    blacklist_session_path: Optional[str] = None  # Путь к сессии для ЧС
 
 
 @dataclass
@@ -29,6 +30,7 @@ class FoundItem:
     mode: str
     author_username: Optional[str]
     author_full_name: Optional[str]
+    author_id: Optional[int]  # Telegram User ID (не меняется, в отличие от username)
     date: str
     price: int
     shk: Optional[str]
@@ -45,3 +47,17 @@ class FoundItem:
     content_hash: Optional[str] = None  # Хеш для умной дедупликации
     topic_id: Optional[int] = None  # ID топика (для форумов/супергрупп)
     topic_name: Optional[str] = None  # Название топика (например, "МСК - Ozon")
+
+
+@dataclass
+class BlacklistRecord:
+    """Модель записи в черном списке"""
+    id: Optional[int]
+    telegram_user_id: int  # Telegram User ID (основной идентификатор для поиска)
+    username: Optional[str]  # @username (может меняться)
+    full_name: Optional[str]  # ФИО из сообщения в ЧС
+    phone: Optional[str]  # Телефон (если указан)
+    role: str  # "worker" или "employer"
+    message_link: str  # Ссылка на сообщение в чате ЧС
+    message_id: int  # ID сообщения в чате ЧС
+    parsed_at: str  # Дата парсинга

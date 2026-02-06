@@ -86,12 +86,12 @@ class TelegramNotifier:
 
         message_text = "\n".join(message_parts)
 
-        # Кнопки
+        # Кнопки (кнопка ЧС для обоих режимов)
         if mode == "worker":
             buttons = [
                 [
                     InlineKeyboardButton(
-                        "Отправить на проверку в ЧС",
+                        "Проверить в ЧС",
                         callback_data=f"check_blacklist:{item_id}"
                     )
                 ],
@@ -103,7 +103,14 @@ class TelegramNotifier:
                 ]
             ]
         else:
+            # Для employer: сначала проверка в ЧС, потом связаться
             buttons = [
+                [
+                    InlineKeyboardButton(
+                        "Проверить в ЧС",
+                        callback_data=f"check_blacklist:{item_id}"
+                    )
+                ],
                 [
                     InlineKeyboardButton(
                         "Связаться",
