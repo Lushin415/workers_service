@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from loguru import logger
 
 from config import config
+from typing import Optional
 from models_api import (
     StartMonitoringRequest,
     StartMonitoringResponse,
@@ -17,7 +18,9 @@ from models_api import (
     StopMonitoringResponse,
     FoundItemsListResponse,
     FoundItemResponse,
-    CheckBlacklistResponse
+    CheckBlacklistResponse,
+    BlacklistChatsListResponse,
+    BlacklistChatTopicsResponse,
 )
 from models_db import Task
 from db_service import DBService
@@ -421,7 +424,7 @@ async def check_in_blacklist(username: str, blacklist_session_path: str = None):
 
 # ========== Управление чатами черного списка ==========
 
-@app.get("/blacklist/chats")
+@app.get("/blacklist/chats", response_model=BlacklistChatsListResponse)
 async def get_blacklist_chats():
     """
     Получить список чатов черного списка
@@ -444,9 +447,9 @@ async def get_blacklist_chats():
 @app.post("/blacklist/chats/add")
 async def add_blacklist_chat(
     chat_username: str,
-    chat_title: str = None,
-    topic_id: int = None,
-    topic_name: str = None,
+    chat_title: Optional[str] = None,
+    topic_id: Optional[int] = None,
+    topic_name: Optional[str] = None,
 ):
     """
     Добавить чат в список черного списка
@@ -481,7 +484,7 @@ async def add_blacklist_chat(
 
 
 @app.post("/blacklist/chats/remove")
-async def remove_blacklist_chat(chat_username: str, topic_id: int = None):
+async def remove_blacklist_chat(chat_username: str, topic_id: Optional[int] = None):
     """
     Удалить (деактивировать) чат из списка черного списка
 
@@ -507,8 +510,8 @@ async def remove_blacklist_chat(chat_username: str, topic_id: int = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/blacklist/chats/topics")
-async def get_chat_topics(chat_username: str, blacklist_session_path: str = None):
+@app.get("/blacklist/chats/topics", response_model=BlacklistChatTopicsResponse)
+async def get_chat_topics(chat_username: str, blacklist_session_path: Optional[str] = None):
     """
     Получить список топиков форума (если чат является форумом)
 

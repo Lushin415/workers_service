@@ -115,3 +115,33 @@ class BlacklistStatsResponse(BaseModel):
     employers: int
     last_cache_update: Optional[str] = None
     service_last_refresh: Optional[str] = None
+
+
+class BlacklistChatInfo(BaseModel):
+    """Информация о чате черного списка"""
+    chat_username: str
+    chat_title: Optional[str] = None
+    added_at: str
+    is_active: bool
+    topic_id: Optional[int] = None
+    topic_name: Optional[str] = None
+
+
+class BlacklistChatsListResponse(BaseModel):
+    """Список чатов черного списка"""
+    chats: List[BlacklistChatInfo]
+    total: int
+    active: int
+
+
+class BlacklistChatTopicInfo(BaseModel):
+    """Информация о топике форума"""
+    id: int
+    name: str
+
+
+class BlacklistChatTopicsResponse(BaseModel):
+    """Ответ на запрос топиков чата"""
+    is_forum: bool
+    chat_title: str
+    topics: List[BlacklistChatTopicInfo]

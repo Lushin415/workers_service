@@ -151,25 +151,36 @@ class DBService:
                 )
             """)
 
-            # Миграция: добавляем topic_id и topic_name в blacklist_chats
+            # Миграция: пересоздаём blacklist_chats с новым UNIQUE(chat_username, topic_id)
+            # Нужно, т.к. старая таблица имела UNIQUE(chat_username) — нельзя DROP constraint в SQLite
             try:
-                await db.execute("ALTER TABLE blacklist_chats ADD COLUMN topic_id INTEGER")
-                logger.info("Добавлен столбец topic_id в blacklist_chats")
-            except:
-                pass
+                # Проверяем, нужна ли миграция (есть ли столбец topic_id)
+                async with db.execute("PRAGMA table_info(blacklist_chats)") as cursor:
+                    columns = [row[1] for row in await cursor.fetchall()]
 
-            try:
-                await db.execute("ALTER TABLE blacklist_chats ADD COLUMN topic_name TEXT")
-                logger.info("Добавлен столбец topic_name в blacklist_chats")
-            except:
-                pass
-
-            # Создаём составной уникальный индекс (chat_username + topic_id)
-            # DROP старого UNIQUE constraint нельзя в SQLite, но новые записи проверяются через INSERT логику
-            await db.execute("""
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_blacklist_chat_topic
-                ON blacklist_chats(chat_username, COALESCE(topic_id, 0))
-            """)
+                if "topic_id" not in columns:
+                    logger.info("Миграция blacklist_chats: добавляем topic_id/topic_name...")
+                    await db.execute("""
+                        CREATE TABLE blacklist_chats_new (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            chat_username TEXT NOT NULL,
+                            chat_title TEXT,
+                            added_at TEXT NOT NULL,
+                            is_active BOOLEAN DEFAULT 1,
+                            topic_id INTEGER,
+                            topic_name TEXT,
+                            UNIQUE(chat_username, COALESCE(topic_id, 0))
+                        )
+                    """)
+                    await db.execute("""
+                        INSERT INTO blacklist_chats_new (id, chat_username, chat_title, added_at, is_active)
+                        SELECT id, chat_username, chat_title, added_at, is_active FROM blacklist_chats
+                    """)
+                    await db.execute("DROP TABLE blacklist_chats")
+                    await db.execute("ALTER TABLE blacklist_chats_new RENAME TO blacklist_chats")
+                    logger.info("Миграция blacklist_chats завершена")
+            except Exception as e:
+                logger.error(f"Ошибка миграции blacklist_chats: {e}")
 
             # Добавляем дефолтный чат если таблица пустая
             await db.execute("""
