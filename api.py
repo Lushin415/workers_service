@@ -118,6 +118,31 @@ async def shutdown_event():
     """Очистка при остановке"""
     global cleanup_task
 
+    logger.info("=" * 60)
+    logger.info("ОСТАНОВКА WORKERS SERVICE")
+    logger.info("=" * 60)
+
+    # Graceful shutdown: останавливаем все активные задачи мониторинга
+    logger.info("Остановка активных задач мониторинга...")
+    active_tasks = list(state_manager._tasks.keys())
+
+    for task_id in active_tasks:
+        try:
+            # Останавливаем задачу в state_manager
+            state_manager.stop_task(task_id)
+
+            # Обновляем статус в БД
+            await db_service.update_task_status(
+                task_id=task_id,
+                status='stopped',
+                stopped_at=datetime.utcnow().isoformat()
+            )
+            logger.debug(f"Задача {task_id} остановлена")
+        except Exception as e:
+            logger.error(f"Ошибка остановки задачи {task_id}: {e}")
+
+    logger.info(f"✅ Остановлено {len(active_tasks)} задач мониторинга")
+
     # Останавливаем фоновую задачу cleanup
     if cleanup_task and not cleanup_task.done():
         cleanup_task.cancel()
@@ -126,7 +151,7 @@ async def shutdown_event():
         except asyncio.CancelledError:
             logger.info("🧹 Auto-cleanup задача остановлена")
 
-    logger.info("Workers Service остановлен")
+    logger.success("Workers Service остановлен")
 
 
 @app.get("/")
