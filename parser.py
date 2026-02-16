@@ -176,7 +176,7 @@ class TelegramParser:
             logger.error(f"Ошибка парсинга истории чата {chat_username}: {e}")
             return 0
 
-    def setup_realtime_handler(
+    async def setup_realtime_handler(
         self,
         chat_usernames: List[str],
         handler: Callable
@@ -194,12 +194,22 @@ class TelegramParser:
 
         logger.info(f"[REALTIME] Регистрация handlers для чатов: {chat_usernames}")
 
-        # Убираем @ из usernames (filters.chat ожидает без @)
-        clean_usernames = [username.lstrip('@') for username in chat_usernames]
-        logger.info(f"[REALTIME] Чистые usernames для фильтра: {clean_usernames}")
+        # Резолвим числовые chat_id — надёжнее чем username строки
+        chat_ids = []
+        for username in chat_usernames:
+            try:
+                chat = await self.client.get_chat(username)
+                chat_ids.append(chat.id)
+                logger.info(f"[REALTIME] Resolved {username} -> chat_id={chat.id}")
+            except Exception as e:
+                logger.error(f"[REALTIME] Не удалось резолвить {username}: {e}")
 
-        # Создаем фильтр для указанных чатов
-        chat_filter = filters.chat(clean_usernames)
+        if not chat_ids:
+            logger.error("[REALTIME] Не удалось резолвить ни один чат!")
+            return
+
+        # Создаем фильтр по числовым ID (надёжнее чем username строки)
+        chat_filter = filters.chat(chat_ids)
 
         # Основной обработчик для отфильтрованных сообщений
         async def message_handler(client, message: Message):
@@ -228,15 +238,67 @@ class TelegramParser:
         self.client.add_handler(PyrogramMessageHandler(message_handler, filters=chat_filter))
         logger.info(f"✅ Настроен real-time мониторинг чатов: {', '.join(chat_usernames)}")
 
-    async def run_until_stopped(self, stop_event: asyncio.Event):
+    async def poll_new_messages(
+        self,
+        chat_usernames: List[str],
+        last_seen_msg_id: Dict[int, int],
+        handler: Callable
+    ):
         """
-        Ждать до сигнала остановки с автоматическим переподключением.
+        Polling fallback — проверяем новые сообщения через get_chat_history.
+        Вызывается каждые 30 сек для компенсации ненадёжности MTProto updates.
 
-        Pyrogram обрабатывает updates через внутренние asyncio tasks на том же event loop.
-        Мы периодически проверяем соединение и переподключаемся при необходимости.
+        Args:
+            chat_usernames: список чатов для проверки (строки для get_chat_history)
+            last_seen_msg_id: словарь {числовой chat_id: last_message_id}
+            handler: функция обработчик сообщений
+        """
+        for chat_username in chat_usernames:
+            try:
+                # Собираем новые сообщения со снимком last_id ДО обработки,
+                # чтобы handler не мутировал last_seen_msg_id в процессе итерации
+                new_messages = []
+                snapshot_last_id = 0
+
+                async for msg in self.client.get_chat_history(chat_username, limit=5):
+                    if not msg.text:
+                        continue
+                    # Снимок берём один раз из первого сообщения (у всех один chat.id)
+                    if not snapshot_last_id and not new_messages:
+                        snapshot_last_id = last_seen_msg_id.get(msg.chat.id, 0)
+                    if msg.id > snapshot_last_id:
+                        new_messages.append(msg)
+                    else:
+                        break  # Более старые тоже уже обработаны
+
+                # Обрабатываем oldest-first для корректного порядка
+                for msg in reversed(new_messages):
+                    chat_name = chat_username
+                    if msg.chat.username:
+                        chat_name = f"@{msg.chat.username}"
+
+                    logger.debug(f"[POLLING] Новое сообщение в {chat_username}: msg_id={msg.id}")
+                    await handler(msg, chat_name)
+
+            except Exception as e:
+                logger.warning(f"[POLLING] Ошибка для {chat_username}: {e}")
+
+    async def run_until_stopped(
+        self,
+        stop_event: asyncio.Event,
+        chat_usernames: List[str] = None,
+        last_seen_msg_id: Dict[int, int] = None,
+        message_handler: Callable = None
+    ):
+        """
+        Ждать до сигнала остановки с автоматическим переподключением
+        и polling fallback для получения пропущенных сообщений.
 
         Args:
             stop_event: asyncio.Event для остановки
+            chat_usernames: список чатов для polling fallback
+            last_seen_msg_id: словарь последних обработанных message_id per chat
+            message_handler: обработчик сообщений для polling fallback
         """
         try:
             # Загружаем чаты в session storage чтобы избежать "Peer id invalid"
@@ -283,6 +345,12 @@ class TelegramParser:
                     else:
                         # Соединение в порядке
                         logger.debug("✓ Соединение активно")
+
+                        # Polling fallback — проверяем не пропустили ли сообщения
+                        if chat_usernames and last_seen_msg_id is not None and message_handler:
+                            await self.poll_new_messages(
+                                chat_usernames, last_seen_msg_id, message_handler
+                            )
 
             logger.info("Получен сигнал остановки парсера")
 

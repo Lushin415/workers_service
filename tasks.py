@@ -3,7 +3,7 @@
 """
 import asyncio
 from datetime import datetime
-from typing import List
+from typing import List, Dict, Set
 from loguru import logger
 
 from config import config
@@ -61,6 +61,11 @@ class MonitoringTask:
         # Кэш топиков: {chat_username: {topic_id: topic_name}}
         self.topics_cache = {}
 
+        # Дедупликация: трекинг обработанных сообщений по chat_id:msg_id
+        self.processed_messages: Set[str] = set()
+        # Последний обработанный message_id для каждого чата (ключ = числовой chat.id)
+        self.last_seen_msg_id: Dict[int, int] = {}
+
         # Событие остановки
         self.stop_event = state_manager.create_task(task_id, mode)
 
@@ -73,6 +78,23 @@ class MonitoringTask:
             chat_name: имя чата
         """
         try:
+            # Дедупликация по message_id + chat_id (защита от двойной обработки
+            # одного сообщения real-time handler'ом И polling fallback'ом)
+            msg_key = f"{message.chat.id}:{message.id}"
+            if msg_key in self.processed_messages:
+                return  # Уже обработано
+            self.processed_messages.add(msg_key)
+
+            # Ограничиваем рост set (polling проверяет только 5 последних сообщений,
+            # поэтому старые msg_key безопасно удалять)
+            if len(self.processed_messages) > 10000:
+                self.processed_messages.clear()
+
+            # Обновляем last_seen_msg_id для polling fallback (ключ = числовой chat.id)
+            self.last_seen_msg_id[message.chat.id] = max(
+                message.id, self.last_seen_msg_id.get(message.chat.id, 0)
+            )
+
             # Обновляем счетчик обработанных сообщений
             state_manager.update_stats(self.task_id, messages_scanned=1)
 
@@ -302,13 +324,18 @@ class MonitoringTask:
             # Настраиваем real-time мониторинг
             if not self.stop_event.is_set():
                 logger.info(f"Настраиваем real-time мониторинг для задачи {self.task_id}")
-                self.parser.setup_realtime_handler(
+                await self.parser.setup_realtime_handler(
                     chat_usernames=self.chats,
                     handler=self.process_message
                 )
 
-                # Ждем сигнала остановки
-                await self.parser.run_until_stopped(self.stop_event)
+                # Ждем сигнала остановки (с polling fallback)
+                await self.parser.run_until_stopped(
+                    self.stop_event,
+                    chat_usernames=self.chats,
+                    last_seen_msg_id=self.last_seen_msg_id,
+                    message_handler=self.process_message
+                )
 
         except asyncio.CancelledError:
             logger.info(f"Задача {self.task_id} отменена (CancelledError)")

@@ -46,9 +46,6 @@ db_service = DBService(db_path=config.DB_PATH)
 # Сервис черного списка (инициализируется при startup)
 blacklist_service: BlacklistService = None
 
-# Обработчик callback-кнопок (инициализируется при startup)
-callback_handler: CallbackHandler = None
-
 # Фоновая задача auto-cleanup
 cleanup_task = None
 
@@ -89,7 +86,7 @@ async def cleanup_old_items_periodically():
 @app.on_event("startup")
 async def startup_event():
     """Инициализация при запуске"""
-    global blacklist_service, callback_handler, cleanup_task
+    global blacklist_service, cleanup_task
 
     # Инициализация БД
     await db_service.init_db()
@@ -104,17 +101,10 @@ async def startup_event():
     )
     logger.info(f"BlacklistService инициализирован (сессия: {config.BLACKLIST_SESSION_PATH})")
 
-    # Инициализация обработчика callback-кнопок
-    if config.BOT_TOKEN:
-        callback_handler = CallbackHandler(
-            bot_token=config.BOT_TOKEN,
-            blacklist_service=blacklist_service,
-            db_service=db_service
-        )
-        callback_handler.start_polling()
-        logger.info("Callback handler запущен")
-    else:
-        logger.warning("BOT_TOKEN не задан, callback handler не запущен")
+    # Callback-кнопки обрабатываются в PurserHub (главном боте),
+    # т.к. BOT_TOKEN общий и polling ведёт PurserHub.
+    # Workers-service только отправляет уведомления через Bot API.
+    logger.info("Callback handler отключён (обработка в PurserHub)")
 
     # Запускаем фоновую задачу auto-cleanup (раз в сутки)
     cleanup_task = asyncio.create_task(cleanup_old_items_periodically())
@@ -126,11 +116,7 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     """Очистка при остановке"""
-    global callback_handler, cleanup_task
-
-    # Останавливаем callback handler
-    if callback_handler:
-        callback_handler.stop_polling()
+    global cleanup_task
 
     # Останавливаем фоновую задачу cleanup
     if cleanup_task and not cleanup_task.done():
