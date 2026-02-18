@@ -182,7 +182,13 @@ class DBService:
             except Exception as e:
                 logger.error(f"Ошибка миграции blacklist_chats: {e}")
 
-            # Добавляем дефолтный чат если таблица пустая
+            # Уникальный индекс для защиты от дублей (chat_username + topic_id)
+            await db.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_blacklist_chats_unique
+                ON blacklist_chats(chat_username, COALESCE(topic_id, -1))
+            """)
+
+            # Добавляем дефолтный чат если ещё не существует
             await db.execute("""
                 INSERT OR IGNORE INTO blacklist_chats (chat_username, chat_title, added_at, is_active)
                 VALUES ('@Blacklist_pvz', 'Чёрный Список ПВЗ', datetime('now'), 1)
@@ -608,6 +614,30 @@ class DBService:
                 rows = await cursor.fetchall()
                 return [dict(row) for row in rows]
 
+    async def sync_blacklist_chats(self, chats: list) -> int:
+        """
+        Полная замена списка чатов ЧС.
+        chats — список dict с ключами: chat_username, topic_id (опц.), topic_name (опц.)
+        Возвращает количество добавленных чатов.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("DELETE FROM blacklist_chats")
+            count = 0
+            for entry in chats:
+                chat_username = entry.get("chat_username", "")
+                if not chat_username.startswith("@"):
+                    chat_username = f"@{chat_username}"
+                topic_id = entry.get("topic_id")
+                topic_name = entry.get("topic_name")
+                await db.execute("""
+                    INSERT OR IGNORE INTO blacklist_chats (chat_username, added_at, is_active, topic_id, topic_name)
+                    VALUES (?, datetime('now'), 1, ?, ?)
+                """, (chat_username, topic_id, topic_name))
+                count += 1
+            await db.commit()
+            logger.info(f"Синхронизировано чатов ЧС: {count}")
+            return count
+
     async def add_blacklist_chat(
         self,
         chat_username: str,
@@ -634,7 +664,7 @@ class DBService:
         async with aiosqlite.connect(self.db_path) as db:
             try:
                 await db.execute("""
-                    INSERT INTO blacklist_chats (chat_username, chat_title, added_at, is_active, topic_id, topic_name)
+                    INSERT OR IGNORE INTO blacklist_chats (chat_username, chat_title, added_at, is_active, topic_id, topic_name)
                     VALUES (?, ?, datetime('now'), 1, ?, ?)
                 """, (chat_username, chat_title, topic_id, topic_name))
                 await db.commit()

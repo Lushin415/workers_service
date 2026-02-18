@@ -281,6 +281,8 @@ class TelegramParser:
                     await handler(msg, chat_name)
 
             except Exception as e:
+                if "AUTH_KEY_UNREGISTERED" in str(e) or "AUTH_KEY_INVALID" in str(e):
+                    raise
                 logger.warning(f"[POLLING] Ошибка для {chat_username}: {e}")
 
     async def run_until_stopped(
@@ -358,6 +360,8 @@ class TelegramParser:
             logger.info("run_until_stopped отменён (CancelledError)")
             raise
         except Exception as e:
+            if "AUTH_KEY_UNREGISTERED" in str(e) or "AUTH_KEY_INVALID" in str(e):
+                raise
             logger.error(f"Ошибка в run_until_stopped: {e}")
             import traceback
             logger.error(traceback.format_exc())

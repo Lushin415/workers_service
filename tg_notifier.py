@@ -73,11 +73,11 @@ class TelegramNotifier:
             message_parts.append(f"👤 {' '.join(author_info)}")
 
         # Информация о чате
-        message_parts.append(f"💬 Чат: {item_data.get('chat_name', 'не указан')}")
+        # message_parts.append(f"💬 Чат: {item_data.get('chat_name', 'не указан')}")
 
         # Ссылка на сообщение
-        if item_data.get('message_link'):
-            message_parts.append(f"🔗 {item_data['message_link']}")
+        # if item_data.get('message_link'):
+        #     message_parts.append(f"🔗 {item_data['message_link']}")
 
         # Полный текст сообщения
         message_parts.append("")
@@ -139,4 +139,17 @@ class TelegramNotifier:
             return True
         except TelegramError as e:
             logger.error(f"Ошибка отправки уведомления: {e}")
+            return False
+
+    async def send_text_message(self, text: str) -> bool:
+        """Отправить произвольное текстовое сообщение пользователю"""
+        try:
+            await self.bot.send_message(
+                chat_id=self.chat_id,
+                text=text,
+                parse_mode="HTML"
+            )
+            return True
+        except TelegramError as e:
+            logger.error(f"Ошибка отправки сообщения: {e}")
             return False

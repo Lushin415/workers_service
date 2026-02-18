@@ -5,7 +5,7 @@ import json
 import uuid
 import asyncio
 from datetime import datetime
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Body
 from fastapi.responses import JSONResponse
 from loguru import logger
 
@@ -196,7 +196,8 @@ async def start_monitoring(request: StartMonitoringRequest):
                 'date_to': request.filters.date_to.isoformat(),
                 'min_price': request.filters.min_price,
                 'max_price': request.filters.max_price,
-                'shk_filter': request.filters.shk_filter
+                'shk_filter': request.filters.shk_filter,
+                'city_filter': request.filters.city_filter
             }),
             notification_chat_id=request.notification_chat_id,
             status='pending',
@@ -218,7 +219,8 @@ async def start_monitoring(request: StartMonitoringRequest):
                 'date_to': request.filters.date_to,
                 'min_price': request.filters.min_price,
                 'max_price': request.filters.max_price,
-                'shk_filter': request.filters.shk_filter
+                'shk_filter': request.filters.shk_filter,
+                'city_filter': request.filters.city_filter
             },
             api_id=request.api_id or config.API_ID,
             api_hash=request.api_hash or config.API_HASH,
@@ -452,6 +454,17 @@ async def get_blacklist_chats():
 
     except Exception as e:
         logger.error(f"Ошибка получения списка чатов ЧС: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/blacklist/chats/sync")
+async def sync_blacklist_chats(chats: list = Body(...)):
+    """Полная замена списка чатов ЧС (вызывается из parserhub при сохранении настроек)"""
+    try:
+        count = await db_service.sync_blacklist_chats(chats)
+        return {"status": "ok", "synced": count}
+    except Exception as e:
+        logger.error(f"Ошибка синхронизации чатов ЧС: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

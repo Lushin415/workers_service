@@ -13,6 +13,7 @@ class Filters(BaseModel):
     min_price: int = 0
     max_price: int = 999_999_999
     shk_filter: str = "любое"  # "любое", конкретное значение или "мало"/"много"
+    city_filter: str = "ALL"  # "МСК", "СПБ", "ALL"
 
 
 class StartMonitoringRequest(BaseModel):

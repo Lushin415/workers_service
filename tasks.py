@@ -36,8 +36,28 @@ class MonitoringTask:
         self.task_id = task_id
         self.user_id = user_id
         self.mode = mode
-        self.chats = chats
         self.api_id = api_id
+
+        # Парсим фильтры по топикам: "@chat/topic_id" → chat_topic_filter["@chat"] = topic_id
+        # Для обычных чатов (без "/") фильтра нет → мониторим весь чат
+        self.chat_topic_filter: Dict[str, int] = {}
+        parsed_chats = []
+        for chat in chats:
+            if '/' in chat:
+                parts = chat.rsplit('/', 1)
+                try:
+                    base_chat = parts[0]
+                    required_topic_id = int(parts[1])
+                    self.chat_topic_filter[base_chat] = required_topic_id
+                    if base_chat not in parsed_chats:
+                        parsed_chats.append(base_chat)
+                except ValueError:
+                    if chat not in parsed_chats:
+                        parsed_chats.append(chat)
+            else:
+                if chat not in parsed_chats:
+                    parsed_chats.append(chat)
+        self.chats = parsed_chats
         self.api_hash = api_hash
         self.notification_chat_id = notification_chat_id
         self.parse_history_days = parse_history_days
@@ -51,6 +71,7 @@ class MonitoringTask:
             max_price=filters_dict['max_price'],
             shk_filter=filters_dict['shk_filter']
         )
+        self.city_filter = filters_dict.get('city_filter', 'ALL')
 
         # Сервисы
         self.db = DBService(db_path=config.DB_PATH)
@@ -95,11 +116,23 @@ class MonitoringTask:
                 message.id, self.last_seen_msg_id.get(message.chat.id, 0)
             )
 
+            # Фильтр по топику: если чат указан как "@chat/topic_id" — пропускаем
+            # сообщения из других топиков этого форума
+            required_topic = self.chat_topic_filter.get(chat_name)
+            if required_topic is not None:
+                actual_topic = getattr(message, 'message_thread_id', None)
+                if actual_topic != required_topic:
+                    logger.debug(
+                        f"[TOPIC FILTER] Пропущено: {chat_name} топик={actual_topic}, "
+                        f"ожидается={required_topic}"
+                    )
+                    return
+
             # Обновляем счетчик обработанных сообщений
             state_manager.update_stats(self.task_id, messages_scanned=1)
 
             # Извлекаем данные
-            message_text = message.text
+            message_text = (message.text or "").replace('\x00', '')
             message_date = message.date
 
             extracted = MessageExtractor.extract(message_text, message_date)
@@ -135,11 +168,16 @@ class MonitoringTask:
                 topic_id = message.message_thread_id
                 logger.debug(f"Сообщение из топика: topic_id={topic_id}")
             elif hasattr(message, 'reply_to_message_id') and message.reply_to_message_id:
-                # Fallback: используем reply_to_message_id если это похоже на топик
-                # (разница ID больше 100 = не обычный reply на соседнее сообщение)
-                if message.reply_to_message_id < message.id - 100:
-                    topic_id = message.reply_to_message_id
-                    logger.debug(f"Сообщение из топика (через reply_to): topic_id={topic_id}")
+                # Fallback: используем reply_to_message_id если оно совпадает с известным topic_id из кэша
+                rid = message.reply_to_message_id
+                chat_topics = self.topics_cache.get(chat_name, {})
+                if rid in chat_topics:
+                    topic_id = rid
+                    logger.debug(f"Сообщение из топика (через reply_to+cache): topic_id={topic_id}")
+                elif message.id - rid > 100:
+                    # Запасной вариант: большая разница ID говорит о топике (старая эвристика)
+                    topic_id = rid
+                    logger.debug(f"Сообщение из топика (через reply_to эвристика): topic_id={topic_id}")
 
             if topic_id:
 
@@ -182,6 +220,15 @@ class MonitoringTask:
 
             # Формируем ссылку на сообщение
             message_link = f"https://t.me/{chat_name.lstrip('@')}/{message.id}"
+
+            # Фильтрация по городу (через topic_name)
+            if self.city_filter != "ALL":
+                if not topic_name or self.city_filter not in topic_name.upper():
+                    logger.debug(
+                        f"Пропущено: топик '{topic_name}' не соответствует "
+                        f"фильтру города '{self.city_filter}'"
+                    )
+                    return
 
             # ДВУХУРОВНЕВАЯ ДЕДУПЛИКАЦИЯ:
 
@@ -340,9 +387,20 @@ class MonitoringTask:
         except asyncio.CancelledError:
             logger.info(f"Задача {self.task_id} отменена (CancelledError)")
         except Exception as e:
-            logger.error(f"Ошибка в задаче {self.task_id}: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
+            if "AUTH_KEY_UNREGISTERED" in str(e) or "AUTH_KEY_INVALID" in str(e):
+                logger.error(f"Сессия мониторинга аннулирована Telegram для задачи {self.task_id}")
+                try:
+                    await self.notifier.send_text_message(
+                        "⚠️ <b>Сессия авторизации не найдена</b>\n\n"
+                        "Telegram аннулировал сессию мониторинга.\n"
+                        "Пожалуйста, авторизуйтесь заново через меню \"👤 Мой аккаунт\"."
+                    )
+                except Exception as notify_err:
+                    logger.error(f"Не удалось отправить уведомление об ошибке авторизации: {notify_err}")
+            else:
+                logger.error(f"Ошибка в задаче {self.task_id}: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
         finally:
             # Останавливаем парсер
             if self.parser:

@@ -171,11 +171,22 @@ class BlacklistService:
                 topic_id = chat_entry.get("topic_id")
                 topic_name = chat_entry.get("topic_name")
 
+                # Если chat_username хранится как "@chat/topic_id" — разбираем на части
+                # (старый формат или данные без topic_id в отдельном поле)
+                if '/' in chat_username:
+                    parts = chat_username.rsplit('/', 1)
+                    try:
+                        if topic_id is None:
+                            topic_id = int(parts[1])
+                        chat_username = parts[0]
+                    except ValueError:
+                        pass  # Не число — оставляем как есть
+
                 try:
-                    topic_info = f" (топик: {topic_name})" if topic_name else ""
+                    topic_info = f" (топик: {topic_name or topic_id})" if topic_id else ""
                     logger.debug(f"Проверяем чат: {chat_username}{topic_info}")
 
-                    # Получаем чат
+                    # Получаем чат (базовый username без /topic_id)
                     chat = await client.get_chat(chat_username)
                     chat_id = chat.id
                     chats_checked.append(chat_username)
@@ -194,14 +205,12 @@ class BlacklistService:
                                 if not text:
                                     continue
 
-                                # Ищем совпадение по User ID
+                                # Ищем совпадение по User ID (все ID в сообщении)
                                 if user_id:
-                                    id_match = self.ID_PATTERN.search(text)
-                                    if id_match:
-                                        found_id = int(id_match.group(1))
-                                        if found_id == user_id:
-                                            logger.info(f"Найден в ЧС по ID: {user_id} в чате {chat_username}{topic_info}")
-                                            return self._build_found_result_raw(raw_msg, text, "user_id", user_id, chat_username, topic_id)
+                                    found_ids = [int(m) for m in self.ID_PATTERN.findall(text)]
+                                    if user_id in found_ids:
+                                        logger.info(f"Найден в ЧС по ID: {user_id} в чате {chat_username}{topic_info}")
+                                        return self._build_found_result_raw(raw_msg, text, "user_id", user_id, chat_username, topic_id)
 
                                 # Ищем совпадение по username
                                 if username:
@@ -225,19 +234,16 @@ class BlacklistService:
 
                                 total_messages_checked += 1
 
-                                if not message.text:
+                                text = message.text or message.caption
+                                if not text:
                                     continue
 
-                                text = message.text
-
-                                # Ищем совпадение по User ID
+                                # Ищем совпадение по User ID (все ID в сообщении)
                                 if user_id:
-                                    id_match = self.ID_PATTERN.search(text)
-                                    if id_match:
-                                        found_id = int(id_match.group(1))
-                                        if found_id == user_id:
-                                            logger.info(f"Найден в ЧС по ID: {user_id} в чате {chat_username}")
-                                            return self._build_found_result(message, text, "user_id", user_id, chat_username)
+                                    found_ids = [int(m) for m in self.ID_PATTERN.findall(text)]
+                                    if user_id in found_ids:
+                                        logger.info(f"Найден в ЧС по ID: {user_id} в чате {chat_username}")
+                                        return self._build_found_result(message, text, "user_id", user_id, chat_username)
 
                                 # Ищем совпадение по username
                                 if username:
