@@ -101,188 +101,226 @@ class BlacklistService:
 
         return messages
 
-    async def search_in_blacklist(
+    async def _scan_chats(
         self,
-        user_id: Optional[int] = None,
+        client: Client,
+        blacklist_chats: List[dict],
+        time_limit: datetime,
+        *,
         username: Optional[str] = None,
-        days: int = 365,
-        session_name: Optional[str] = None
+        user_id: Optional[int] = None,
+        fio_words: Optional[List[str]] = None,
+        match_type: str,
+        total_messages_checked: int = 0,
     ) -> Dict:
         """
-        Поиск в черном списке по User ID или username
-
-        Парсит ВСЕ чаты ЧС из БД в реальном времени и ищет совпадение.
-        Если у чата указан topic_id — ищет только в этом топике (raw API).
-        Если topic_id=NULL — ищет по всей истории чата (get_chat_history).
+        Один проход по всем чатам ЧС с одним критерием поиска.
 
         Args:
-            user_id: Telegram User ID для поиска
-            username: @username для поиска (с или без @)
-            days: сколько дней истории проверять
-            session_name: путь к сессии (опционально)
-
+            match_type: "username" | "user_id" | "fio"  — для метки в результате
         Returns:
-            Словарь с результатом поиска
+            {"found": True, ...} или {"found": False, "messages_checked": N, "chats_checked": [...]}
+        """
+        chats_checked = []
+
+        for chat_entry in blacklist_chats:
+            chat_username = chat_entry["chat_username"]
+            topic_id = chat_entry.get("topic_id")
+            topic_name = chat_entry.get("topic_name")
+
+            # Старый формат "@chat/topic_id" → разбираем
+            if '/' in chat_username:
+                parts = chat_username.rsplit('/', 1)
+                try:
+                    if topic_id is None:
+                        topic_id = int(parts[1])
+                    chat_username = parts[0]
+                except ValueError:
+                    pass
+
+            try:
+                topic_info = f" (топик: {topic_name or topic_id})" if topic_id else ""
+                chat = await client.get_chat(chat_username)
+                chat_id_tg = chat.id
+                chats_checked.append(chat_username)
+
+                if topic_id:
+                    raw_messages = await self._get_topic_messages(client, chat_id_tg, topic_id, time_limit)
+                    for raw_msg in raw_messages:
+                        try:
+                            total_messages_checked += 1
+                            text = getattr(raw_msg, 'message', None)
+                            if not text:
+                                continue
+
+                            if self._matches(text, username=username, user_id=user_id, fio_words=fio_words):
+                                logger.info(f"Найден в ЧС {match_type}: в чате {chat_username}{topic_info}")
+                                return self._build_found_result_raw(raw_msg, text, match_type,
+                                                                     username or user_id or " ".join(fio_words or []),
+                                                                     chat_username, topic_id)
+                            if total_messages_checked % 500 == 0:
+                                logger.debug(f"[{match_type}] Проверено {total_messages_checked} сообщений...")
+                        except Exception as e:
+                            logger.error(f"Ошибка raw сообщения: {e}")
+                else:
+                    async for message in client.get_chat_history(chat_id_tg):
+                        try:
+                            if message.date < time_limit:
+                                break
+                            total_messages_checked += 1
+                            text = message.text or message.caption
+                            if not text:
+                                continue
+
+                            if self._matches(text, username=username, user_id=user_id, fio_words=fio_words):
+                                logger.info(f"Найден в ЧС {match_type}: в чате {chat_username}")
+                                return self._build_found_result(message, text, match_type,
+                                                                username or user_id or " ".join(fio_words or []),
+                                                                chat_username)
+                            if total_messages_checked % 500 == 0:
+                                logger.debug(f"[{match_type}] Проверено {total_messages_checked} сообщений...")
+                        except FloodWait as e:
+                            logger.warning(f"FloodWait: ждём {e.value} сек")
+                            await asyncio.sleep(e.value)
+                        except Exception as e:
+                            logger.error(f"Ошибка сообщения: {e}")
+
+            except Exception as e:
+                logger.error(f"Ошибка доступа к чату {chat_username}: {e}")
+                continue
+
+        return {
+            "found": False,
+            "messages_checked": total_messages_checked,
+            "chats_checked": chats_checked,
+        }
+
+    def _matches(
+        self,
+        text: str,
+        *,
+        username: Optional[str] = None,
+        user_id: Optional[int] = None,
+        fio_words: Optional[List[str]] = None,
+    ) -> bool:
+        """Проверяет, удовлетворяет ли текст сообщения критерию поиска."""
+        text_lower = text.lower()
+
+        if username:
+            return username.lower() in text_lower
+
+        if user_id:
+            found_ids = [int(m) for m in self.ID_PATTERN.findall(text)]
+            return user_id in found_ids
+
+        if fio_words:
+            return all(word.lower() in text_lower for word in fio_words)
+
+        return False
+
+    async def search_in_blacklist(
+        self,
+        username: Optional[str] = None,
+        fio: Optional[str] = None,
+        days: int = 365,
+        session_name: Optional[str] = None,
+        # Оставляем для совместимости с вызовами из check_blacklist_by_item
+        user_id: Optional[int] = None,
+    ) -> Dict:
+        """
+        Трёхступенчатый поиск в черном списке:
+          1. По @username (строковое совпадение)
+          2. По User ID (Pyrogram резолвит username → user_id)
+          3. По ФИО (все слова присутствуют в тексте)
+
+        Каждая ступень — полный проход по всем чатам ЧС.
+        Останавливается при первом совпадении.
         """
         if not user_id and not username:
-            return {
-                "found": False,
-                "error": "Не указан ни user_id, ни username для поиска"
-            }
+            return {"found": False, "error": "Не указан username для поиска"}
 
-        # Нормализуем username (добавляем @ если нет)
         if username and not username.startswith("@"):
             username = f"@{username}"
 
-        # Получаем список активных чатов ЧС из БД (теперь List[dict])
         blacklist_chats = await self.db.get_blacklist_chats(active_only=True)
-
         if not blacklist_chats:
-            return {
-                "found": False,
-                "error": "Нет активных чатов черного списка. Добавьте чаты через API."
-            }
+            return {"found": False, "error": "Нет активных чатов черного списка."}
 
-        # Используем переданную сессию или дефолтную из конструктора
         effective_session = session_name or self.session_name
+        logger.info(f"Поиск в ЧС: username={username}, fio={fio}, чатов: {len(blacklist_chats)}")
 
-        logger.info(f"Поиск в ЧС: user_id={user_id}, username={username}, чатов: {len(blacklist_chats)}, сессия: {effective_session}")
-
-        # Создаём клиент для поиска
-        client = Client(
-            name=effective_session,
-            api_id=self.api_id,
-            api_hash=self.api_hash,
-        )
-
-        total_messages_checked = 0
-        chats_checked = []
+        client = Client(name=effective_session, api_id=self.api_id, api_hash=self.api_hash)
+        steps_done = []
+        total_checked = 0
+        all_chats_checked = []
 
         try:
             await client.start()
-            logger.debug("Pyrogram клиент для поиска в ЧС запущен")
-
-            # Временная граница
             time_limit = datetime.now() - timedelta(days=days)
 
-            # Ищем по всем чатам ЧС
-            for chat_entry in blacklist_chats:
-                chat_username = chat_entry["chat_username"]
-                topic_id = chat_entry.get("topic_id")
-                topic_name = chat_entry.get("topic_name")
+            # === ШАГ 1: поиск по username ===
+            if username:
+                steps_done.append("по никнейму")
+                logger.info(f"ЧС шаг 1: поиск по username={username}")
+                result = await self._scan_chats(
+                    client, blacklist_chats, time_limit,
+                    username=username, match_type="username",
+                    total_messages_checked=total_checked,
+                )
+                total_checked = result.get("messages_checked", total_checked)
+                all_chats_checked = result.get("chats_checked", [])
+                if result["found"]:
+                    return result
 
-                # Если chat_username хранится как "@chat/topic_id" — разбираем на части
-                # (старый формат или данные без topic_id в отдельном поле)
-                if '/' in chat_username:
-                    parts = chat_username.rsplit('/', 1)
-                    try:
-                        if topic_id is None:
-                            topic_id = int(parts[1])
-                        chat_username = parts[0]
-                    except ValueError:
-                        pass  # Не число — оставляем как есть
-
+            # === ШАГ 2: резолвим user_id и ищем по нему ===
+            if username:
+                resolved_user_id = None
                 try:
-                    topic_info = f" (топик: {topic_name or topic_id})" if topic_id else ""
-                    logger.debug(f"Проверяем чат: {chat_username}{topic_info}")
-
-                    # Получаем чат (базовый username без /topic_id)
-                    chat = await client.get_chat(chat_username)
-                    chat_id = chat.id
-                    chats_checked.append(chat_username)
-
-                    if topic_id:
-                        # Поиск ТОЛЬКО в конкретном топике (raw API)
-                        logger.debug(f"Используем GetReplies для топика {topic_id} ({topic_name})")
-                        raw_messages = await self._get_topic_messages(client, chat_id, topic_id, time_limit)
-
-                        for raw_msg in raw_messages:
-                            try:
-                                total_messages_checked += 1
-
-                                # raw message: текст в .message (не .text)
-                                text = getattr(raw_msg, 'message', None)
-                                if not text:
-                                    continue
-
-                                # Ищем совпадение по User ID (все ID в сообщении)
-                                if user_id:
-                                    found_ids = [int(m) for m in self.ID_PATTERN.findall(text)]
-                                    if user_id in found_ids:
-                                        logger.info(f"Найден в ЧС по ID: {user_id} в чате {chat_username}{topic_info}")
-                                        return self._build_found_result_raw(raw_msg, text, "user_id", user_id, chat_username, topic_id)
-
-                                # Ищем совпадение по username
-                                if username:
-                                    username_lower = username.lower()
-                                    if username_lower in text.lower():
-                                        logger.info(f"Найден в ЧС по username: {username} в чате {chat_username}{topic_info}")
-                                        return self._build_found_result_raw(raw_msg, text, "username", username, chat_username, topic_id)
-
-                                if total_messages_checked % 500 == 0:
-                                    logger.debug(f"Проверено {total_messages_checked} сообщений...")
-
-                            except Exception as e:
-                                logger.error(f"Ошибка при проверке raw сообщения: {e}")
-                                continue
-                    else:
-                        # Поиск по ВСЕЙ истории чата (старый способ)
-                        async for message in client.get_chat_history(chat_id):
-                            try:
-                                if message.date < time_limit:
-                                    break
-
-                                total_messages_checked += 1
-
-                                text = message.text or message.caption
-                                if not text:
-                                    continue
-
-                                # Ищем совпадение по User ID (все ID в сообщении)
-                                if user_id:
-                                    found_ids = [int(m) for m in self.ID_PATTERN.findall(text)]
-                                    if user_id in found_ids:
-                                        logger.info(f"Найден в ЧС по ID: {user_id} в чате {chat_username}")
-                                        return self._build_found_result(message, text, "user_id", user_id, chat_username)
-
-                                # Ищем совпадение по username
-                                if username:
-                                    username_lower = username.lower()
-                                    if username_lower in text.lower():
-                                        logger.info(f"Найден в ЧС по username: {username} в чате {chat_username}")
-                                        return self._build_found_result(message, text, "username", username, chat_username)
-
-                                if total_messages_checked % 500 == 0:
-                                    logger.debug(f"Проверено {total_messages_checked} сообщений...")
-
-                            except FloodWait as e:
-                                logger.warning(f"FloodWait: ждём {e.value} секунд")
-                                await asyncio.sleep(e.value)
-                            except Exception as e:
-                                logger.error(f"Ошибка при проверке сообщения: {e}")
-                                continue
-
+                    user_obj = await client.get_users(username.lstrip("@"))
+                    resolved_user_id = user_obj.id
+                    logger.info(f"ЧС шаг 2: {username} → user_id={resolved_user_id}")
                 except Exception as e:
-                    logger.error(f"Ошибка доступа к чату {chat_username}: {e}")
-                    continue
+                    logger.warning(f"Не удалось резолвить {username} → user_id: {e}")
 
-            # Не нашли ни в одном чате
-            logger.info(f"В ЧС не найден (проверено {total_messages_checked} сообщений в {len(chats_checked)} чатах)")
+                if resolved_user_id:
+                    steps_done.append("по User ID")
+                    result = await self._scan_chats(
+                        client, blacklist_chats, time_limit,
+                        user_id=resolved_user_id, match_type="user_id",
+                        total_messages_checked=total_checked,
+                    )
+                    total_checked = result.get("messages_checked", total_checked)
+                    if result["found"]:
+                        return result
+
+            # === ШАГ 3: поиск по ФИО ===
+            if fio:
+                fio_words = [w for w in fio.strip().split() if len(w) >= 2]
+                if fio_words:
+                    steps_done.append("по ФИО")
+                    logger.info(f"ЧС шаг 3: поиск по ФИО={fio_words}")
+                    result = await self._scan_chats(
+                        client, blacklist_chats, time_limit,
+                        fio_words=fio_words, match_type="fio",
+                        total_messages_checked=total_checked,
+                    )
+                    total_checked = result.get("messages_checked", total_checked)
+                    if result["found"]:
+                        return result
+
+            logger.info(f"В ЧС не найден (проверено {total_checked} сообщений, шаги: {steps_done})")
             return {
                 "found": False,
-                "user_id": user_id,
                 "username": username,
-                "messages_checked": total_messages_checked,
-                "chats_checked": chats_checked,
-                "message": f"В черном списке не найден"
+                "messages_checked": total_checked,
+                "chats_checked": all_chats_checked,
+                "steps_done": steps_done,
+                "message": "В черном списке не найден",
             }
 
         except Exception as e:
             logger.error(f"Ошибка поиска в ЧС: {e}")
-            return {
-                "found": False,
-                "error": str(e)
-            }
+            return {"found": False, "error": str(e)}
 
         finally:
             await client.stop()

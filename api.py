@@ -405,25 +405,30 @@ async def check_blacklist_by_item(item_id: int, task_id: str):
 
 
 @app.post("/blacklist/check")
-async def check_in_blacklist(username: str, blacklist_session_path: str = None):
+async def check_in_blacklist(
+    username: str,
+    blacklist_session_path: str = None,
+    fio: str = None,
+):
     """
-    Проверить пользователя в черном списке по username
-
-    Второй сценарий: пользователь вводит @username и получает результат.
-    Поиск идёт по ВСЕМ активным чатам ЧС.
+    Проверить пользователя в черном списке — 3 ступени поиска:
+    1. По @username (строковое совпадение)
+    2. По User ID (Pyrogram резолвит username → user_id)
+    3. По ФИО (все слова должны присутствовать в тексте сообщения)
 
     Args:
         username: Telegram username (с или без @)
-        blacklist_session_path: путь к сессии ЧС (опционально, fallback на конфиг)
+        blacklist_session_path: путь к сессии ЧС
+        fio: ФИО для поиска (опционально)
     """
     try:
         if not blacklist_service:
             raise HTTPException(status_code=503, detail="Сервис черного списка не инициализирован")
 
-        # Ищем в черном списке (в реальном времени по всем чатам)
         result = await blacklist_service.search_in_blacklist(
             username=username,
-            session_name=blacklist_session_path
+            fio=fio or None,
+            session_name=blacklist_session_path,
         )
 
         return result
