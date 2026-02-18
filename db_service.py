@@ -103,6 +103,70 @@ class DBService:
             except:
                 pass  # Столбец уже существует
 
+            # Миграция: UNIQUE(message_link) → UNIQUE(task_id, message_link)
+            # Иначе второй пользователь не получит уведомление об объявлении, уже найденном первым
+            try:
+                needs_migration = True
+                async with db.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='found_items'"
+                ) as cursor:
+                    row = await cursor.fetchone()
+                    if row and 'UNIQUE(task_id, message_link)' in row[0]:
+                        needs_migration = False
+
+                if needs_migration:
+                    await db.execute("""
+                        CREATE TABLE found_items_new (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            task_id TEXT NOT NULL,
+                            mode TEXT NOT NULL,
+                            author_username TEXT,
+                            author_full_name TEXT,
+                            date TEXT NOT NULL,
+                            price INTEGER NOT NULL,
+                            shk TEXT,
+                            location TEXT,
+                            message_text TEXT NOT NULL,
+                            message_link TEXT NOT NULL,
+                            chat_name TEXT NOT NULL,
+                            message_date TEXT NOT NULL,
+                            found_at TEXT NOT NULL,
+                            notified BOOLEAN DEFAULT 0,
+                            content_hash TEXT,
+                            topic_id INTEGER,
+                            topic_name TEXT,
+                            city TEXT,
+                            metro_station TEXT,
+                            district TEXT,
+                            author_id INTEGER,
+                            UNIQUE(task_id, message_link)
+                        )
+                    """)
+                    await db.execute("""
+                        INSERT INTO found_items_new (
+                            id, task_id, mode, author_username, author_full_name,
+                            date, price, shk, location, message_text, message_link,
+                            chat_name, message_date, found_at, notified, content_hash,
+                            topic_id, topic_name, city, metro_station, district, author_id
+                        )
+                        SELECT
+                            id, task_id, mode, author_username, author_full_name,
+                            date, price, shk, location, message_text, message_link,
+                            chat_name, message_date, found_at, notified, content_hash,
+                            topic_id, topic_name, city, metro_station, district, author_id
+                        FROM found_items
+                    """)
+                    await db.execute("DROP TABLE found_items")
+                    await db.execute("ALTER TABLE found_items_new RENAME TO found_items")
+                    await db.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_content_hash
+                        ON found_items(content_hash, found_at)
+                    """)
+                    await db.commit()
+                    logger.info("Миграция: found_items UNIQUE(message_link) → UNIQUE(task_id, message_link)")
+            except Exception as e:
+                logger.error(f"Ошибка миграции found_items unique constraint: {e}")
+
             # Миграция: добавляем session_path и blacklist_session_path в tasks
             try:
                 await db.execute("ALTER TABLE tasks ADD COLUMN session_path TEXT")
@@ -247,6 +311,7 @@ class DBService:
         self,
         content_hash: str,
         work_date: str,
+        task_id: str,
         hours_window: int = 24
     ) -> bool:
         """
@@ -274,8 +339,9 @@ class DBService:
             async with db.execute("""
                 SELECT date FROM found_items
                 WHERE content_hash = ?
+                  AND task_id = ?
                   AND found_at > ?
-            """, (content_hash, time_threshold)) as cursor:
+            """, (content_hash, task_id, time_threshold)) as cursor:
                 rows = await cursor.fetchall()
 
                 # Если не нашли записей с таким хешем → не дубликат
@@ -305,6 +371,7 @@ class DBService:
         author_username: Optional[str],
         work_date: str,
         price: int,
+        task_id: str,
         hours_window: int = 24
     ) -> bool:
         """
@@ -347,9 +414,10 @@ class DBService:
                 WHERE author_username = ?
                   AND date = ?
                   AND price = ?
+                  AND task_id = ?
                   AND found_at > ?
                 LIMIT 1
-            """, (author_username, work_date, price, time_threshold)) as cursor:
+            """, (author_username, work_date, price, task_id, time_threshold)) as cursor:
                 row = await cursor.fetchone()
 
                 if row:
@@ -379,6 +447,7 @@ class DBService:
             is_duplicate = await self.check_duplicate_smart(
                 content_hash=item.content_hash,
                 work_date=item.date,
+                task_id=item.task_id,
                 hours_window=24
             )
 

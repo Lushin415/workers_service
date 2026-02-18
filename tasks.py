@@ -247,6 +247,7 @@ class MonitoringTask:
                     author_username=author_username,
                     work_date=extracted['date'],
                     price=extracted['price'],
+                    task_id=self.task_id,
                     hours_window=24
                 )
 
