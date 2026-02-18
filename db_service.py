@@ -624,7 +624,7 @@ class DBService:
             await db.execute("DELETE FROM blacklist_chats")
             count = 0
             for entry in chats:
-                chat_username = entry.get("chat_username", "")
+                chat_username = entry.get("chat_username", "").lower()
                 if not chat_username.startswith("@"):
                     chat_username = f"@{chat_username}"
                 topic_id = entry.get("topic_id")
@@ -657,7 +657,8 @@ class DBService:
         Returns:
             True если добавлен, False если уже существует
         """
-        # Нормализуем username
+        # Нормализуем username (lowercase + @)
+        chat_username = chat_username.lower()
         if not chat_username.startswith("@"):
             chat_username = f"@{chat_username}"
 
