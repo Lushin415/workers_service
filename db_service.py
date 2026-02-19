@@ -522,6 +522,15 @@ class DBService:
                 row = await cursor.fetchone()
                 return row[0] if row else 0
 
+    async def count_notified_items(self, task_id: str) -> int:
+        """Подсчитать количество отправленных уведомлений (notified=1)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT COUNT(*) FROM found_items WHERE task_id = ? AND notified = 1", (task_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                return row[0] if row else 0
+
     # ========== Методы для работы с черным списком ==========
 
     async def add_blacklist_record(self, record: BlacklistRecord) -> Optional[int]:

@@ -390,6 +390,7 @@ class MonitoringTask:
         except Exception as e:
             if "AUTH_KEY_UNREGISTERED" in str(e) or "AUTH_KEY_INVALID" in str(e):
                 logger.error(f"Сессия мониторинга аннулирована Telegram для задачи {self.task_id}")
+                state_manager.update_status(self.task_id, "auth_error")
                 try:
                     await self.notifier.send_text_message(
                         "⚠️ <b>Сессия авторизации не найдена</b>\n\n"
@@ -402,13 +403,16 @@ class MonitoringTask:
                 logger.error(f"Ошибка в задаче {self.task_id}: {e}")
                 import traceback
                 logger.error(traceback.format_exc())
+                state_manager.update_status(self.task_id, "failed")
         finally:
             # Останавливаем парсер
             if self.parser:
                 await self.parser.stop()
 
-            # Обновляем статус
-            state_manager.update_status(self.task_id, "stopped")
+            # Обновляем статус: "stopped" только если не было специфической ошибки
+            current = state_manager.get_task(self.task_id)
+            if current and current.get("status") not in ("auth_error", "failed"):
+                state_manager.update_status(self.task_id, "stopped")
             logger.info(f"Задача {self.task_id} завершена")
 
 
