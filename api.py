@@ -255,11 +255,25 @@ async def get_task_status(task_id: str):
         if not task_state:
             raise HTTPException(status_code=404, detail="Задача не найдена")
 
+        # Берём items_found и notifications_sent из DB (персистентный источник правды).
+        # In-memory счётчики обнуляются при рестарте workers_service, а found_items
+        # таблица хранит все найденные объявления со статусом notified.
+        db_items_found = await db_service.count_items(task_id)
+        db_notifications_sent = await db_service.count_notified_items(task_id)
+
+        in_mem = task_state['stats']
+        stats = {
+            'total_messages_scanned': in_mem['total_messages_scanned'],
+            'items_found': max(in_mem['items_found'], db_items_found),
+            'notifications_sent': max(in_mem['notifications_sent'], db_notifications_sent),
+            'last_update': in_mem['last_update'],
+        }
+
         return TaskStatusResponse(
             task_id=task_id,
             status=task_state['status'],
             mode=task_state['mode'],
-            stats=task_state['stats']
+            stats=stats
         )
 
     except HTTPException:
