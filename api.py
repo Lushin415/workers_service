@@ -420,7 +420,7 @@ async def check_blacklist_by_item(item_id: int, task_id: str):
 
 @app.post("/blacklist/check")
 async def check_in_blacklist(
-    username: str,
+    username: Optional[str] = None,
     blacklist_session_path: str = None,
     fio: str = None,
 ):
