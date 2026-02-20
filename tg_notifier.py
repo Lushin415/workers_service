@@ -111,12 +111,12 @@ class TelegramNotifier:
                         callback_data=f"check_blacklist:{item_id}"
                     )
                 ],
-                [
-                    InlineKeyboardButton(
-                        "Связаться",
-                        url=item_data.get('message_link', '#')
-                    )
-                ],
+                #[
+                #    InlineKeyboardButton(
+                #        "Связаться",
+                #        url=item_data.get('message_link', '#')
+                #    )
+                #],
                 [
                     InlineKeyboardButton(
                         "Игнорировать",

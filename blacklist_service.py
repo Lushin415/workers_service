@@ -236,8 +236,8 @@ class BlacklistService:
         Каждая ступень — полный проход по всем чатам ЧС.
         Останавливается при первом совпадении.
         """
-        if not user_id and not username:
-            return {"found": False, "error": "Не указан username для поиска"}
+        if not user_id and not username and not fio:
+            return {"found": False, "error": "Необходимо указать username или ФИО для поиска"}
 
         if username and not username.startswith("@"):
             username = f"@{username}"
