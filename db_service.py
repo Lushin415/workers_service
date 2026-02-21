@@ -291,6 +291,16 @@ class DBService:
                     return Task(**dict(row))
                 return None
 
+    async def get_tasks_by_status(self, status: str) -> List[Task]:
+        """Получить все задачи с заданным статусом"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM tasks WHERE status = ?", (status,)
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [Task(**dict(row)) for row in rows]
+
     async def update_task_status(self, task_id: str, status: str, stopped_at: Optional[str] = None):
         """Обновить статус задачи"""
         async with aiosqlite.connect(self.db_path) as db:

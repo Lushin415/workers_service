@@ -91,6 +91,33 @@ async def startup_event():
     # Инициализация БД
     await db_service.init_db()
 
+    # Восстанавливаем задачи со статусом 'paused' (были активны до рестарта контейнера)
+    paused_tasks = await db_service.get_tasks_by_status('paused')
+    if paused_tasks:
+        logger.info(f"Восстановление {len(paused_tasks)} задач после рестарта...")
+        for task in paused_tasks:
+            try:
+                filters = json.loads(task.filters)
+                filters['date_from'] = datetime.fromisoformat(filters['date_from'])
+                filters['date_to'] = datetime.fromisoformat(filters['date_to'])
+
+                start_monitoring_task(
+                    task_id=task.task_id,
+                    user_id=task.user_id,
+                    mode=task.mode,
+                    chats=json.loads(task.chats),
+                    filters_dict=filters,
+                    api_id=config.API_ID,
+                    api_hash=config.API_HASH,
+                    notification_chat_id=task.notification_chat_id,
+                    parse_history_days=0,
+                    session_path=task.session_path or config.SESSION_PATH
+                )
+                logger.info(f"Задача {task.task_id} (user={task.user_id}) восстановлена")
+            except Exception as e:
+                logger.error(f"Ошибка восстановления задачи {task.task_id}: {e}")
+        logger.info(f"Восстановлено задач: {len(paused_tasks)}")
+
     # Инициализация сервиса черного списка (без запуска клиента!)
     # Используем ОТДЕЛЬНУЮ сессию чтобы не конфликтовать с основным парсером
     blacklist_service = BlacklistService(
@@ -131,11 +158,10 @@ async def shutdown_event():
             # Останавливаем задачу в state_manager
             state_manager.stop_task(task_id)
 
-            # Обновляем статус в БД
+            # Обновляем статус в БД — 'paused' чтобы задача восстановилась после рестарта
             await db_service.update_task_status(
                 task_id=task_id,
-                status='stopped',
-                stopped_at=datetime.utcnow().isoformat()
+                status='paused'
             )
             logger.debug(f"Задача {task_id} остановлена")
         except Exception as e:
