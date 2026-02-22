@@ -59,7 +59,7 @@ class FoundItemResponse(BaseModel):
     author_username: Optional[str]
     author_full_name: Optional[str]
     date: str
-    price: int
+    price: Optional[int] = None
     shk: Optional[str]
     location: Optional[str]
     message_link: str

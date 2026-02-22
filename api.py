@@ -4,7 +4,7 @@ FastAPI REST API для Workers Service
 import json
 import uuid
 import asyncio
-from datetime import datetime
+from datetime import datetime, date as date_type
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.responses import JSONResponse
 from loguru import logger
@@ -91,6 +91,54 @@ async def startup_event():
     # Инициализация БД
     await db_service.init_db()
 
+    # Восстанавливаем задачи со статусом 'paused' (были активны до рестарта контейнера)
+    paused_tasks = await db_service.get_tasks_by_status('paused')
+    if paused_tasks:
+        logger.info(f"Восстановление {len(paused_tasks)} задач после рестарта...")
+
+        # Дедупликация по session_path: одна сессия Pyrogram = один клиент.
+        # Если несколько задач используют одну сессию — восстанавливаем только последнюю
+        # (по порядку created_at), остальные помечаем как stopped.
+        latest_by_session: dict = {}
+        for task in paused_tasks:
+            key = task.session_path or config.SESSION_PATH
+            existing = latest_by_session.get(key)
+            if existing is None or task.created_at > existing.created_at:
+                latest_by_session[key] = task
+
+        # Помечаем устаревшие дубли как stopped
+        for task in paused_tasks:
+            key = task.session_path or config.SESSION_PATH
+            if latest_by_session[key].task_id != task.task_id:
+                await db_service.update_task_status(task_id=task.task_id, status='stopped')
+                logger.info(f"Дубль задачи {task.task_id} (та же сессия) → stopped")
+
+        # Восстанавливаем только уникальные задачи по сессии
+        restored = 0
+        for task in latest_by_session.values():
+            try:
+                filters = json.loads(task.filters)
+                filters['date_from'] = date_type.fromisoformat(filters['date_from'])
+                filters['date_to'] = date_type.fromisoformat(filters['date_to'])
+
+                start_monitoring_task(
+                    task_id=task.task_id,
+                    user_id=task.user_id,
+                    mode=task.mode,
+                    chats=json.loads(task.chats),
+                    filters_dict=filters,
+                    api_id=config.API_ID,
+                    api_hash=config.API_HASH,
+                    notification_chat_id=task.notification_chat_id,
+                    parse_history_days=0,
+                    session_path=task.session_path or config.SESSION_PATH
+                )
+                restored += 1
+                logger.info(f"Задача {task.task_id} (user={task.user_id}) восстановлена")
+            except Exception as e:
+                logger.error(f"Ошибка восстановления задачи {task.task_id}: {e}")
+        logger.info(f"Восстановлено задач: {restored} из {len(paused_tasks)}")
+
     # Инициализация сервиса черного списка (без запуска клиента!)
     # Используем ОТДЕЛЬНУЮ сессию чтобы не конфликтовать с основным парсером
     blacklist_service = BlacklistService(
@@ -131,11 +179,10 @@ async def shutdown_event():
             # Останавливаем задачу в state_manager
             state_manager.stop_task(task_id)
 
-            # Обновляем статус в БД
+            # Обновляем статус в БД — 'paused' чтобы задача восстановилась после рестарта
             await db_service.update_task_status(
                 task_id=task_id,
-                status='stopped',
-                stopped_at=datetime.utcnow().isoformat()
+                status='paused'
             )
             logger.debug(f"Задача {task_id} остановлена")
         except Exception as e:

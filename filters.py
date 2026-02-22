@@ -46,13 +46,9 @@ class ItemFilter:
             logger.debug("Некорректная дата")
             return False
 
-        # Проверка цены
+        # Проверка цены (None = цена не указана, пропускаем без проверки диапазона)
         price = extracted_data.get('price')
-        if price is None:
-            logger.debug("Цена отсутствует")
-            return False
-
-        if not (self.min_price <= price <= self.max_price):
+        if price is not None and not (self.min_price <= price <= self.max_price):
             logger.debug(f"Цена {price} не в диапазоне {self.min_price} - {self.max_price}")
             return False
 
