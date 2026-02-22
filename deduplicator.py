@@ -14,7 +14,7 @@ class Deduplicator:
     @staticmethod
     def create_content_hash(
         author_username: Optional[str],
-        price: int,
+        price: Optional[int],
         location: Optional[str],
         message_text: str
     ) -> str:
@@ -43,7 +43,7 @@ class Deduplicator:
         # Нормализуем данные (БЕЗ author!)
         loc = location.lower() if location else "unknown"
         text = message_text.strip().lower()
-        price_str = str(price)
+        price_str = str(price) if price is not None else ""
 
         # Создаем строку для хеширования (БЕЗ author!)
         content = f"{price_str}|{loc}|{text}"
@@ -56,7 +56,7 @@ class Deduplicator:
     def create_author_key(
         author_username: str,
         work_date: str,
-        price: int
+        price: Optional[int]
     ) -> str:
         """
         Создать ключ для author-based дедупликации
@@ -83,7 +83,8 @@ class Deduplicator:
         Returns:
             Строковый ключ для проверки дубликатов
         """
-        return f"{author_username}|{work_date}|{price}"
+        price_key = str(price) if price is not None else ""
+        return f"{author_username}|{work_date}|{price_key}"
 
     @staticmethod
     def is_duplicate(

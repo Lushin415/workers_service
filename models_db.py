@@ -32,7 +32,7 @@ class FoundItem:
     author_full_name: Optional[str]
     author_id: Optional[int]  # Telegram User ID (не меняется, в отличие от username)
     date: str
-    price: int
+    price: Optional[int]
     shk: Optional[str]
     location: Optional[str]  # Общее поле локации (для обратной совместимости)
     city: Optional[str]  # Город (Москва, СПБ)

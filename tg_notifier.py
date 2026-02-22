@@ -4,7 +4,7 @@
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
 from loguru import logger
-from typing import Dict, Optional
+from typing import Dict
 
 
 class TelegramNotifier:
@@ -35,7 +35,8 @@ class TelegramNotifier:
         message_parts.append(f"📅 Дата: {item_data.get('date', 'не указана')}")
 
         price_label = "💰 Цена:" if mode == "worker" else "💰 Оплата:"
-        message_parts.append(f"{price_label} {item_data.get('price', 'не указана')} руб/смену")
+        price_val = item_data.get('price')
+        message_parts.append(f"{price_label} {price_val if price_val is not None else 'не указана'} руб/смену")
 
         if item_data.get('shk'):
             message_parts.append(f"📦 ШК: {item_data['shk']}")
@@ -65,7 +66,7 @@ class TelegramNotifier:
         # Информация об авторе
         author_info = []
         if item_data.get('author_username'):
-            author_info.append(f"@{item_data['author_username']}")
+            author_info.append(f"@{item_data['author_username'].lstrip('@')}")
         if item_data.get('author_full_name'):
             author_info.append(f"({item_data['author_full_name']})")
 
@@ -86,44 +87,44 @@ class TelegramNotifier:
 
         message_text = "\n".join(message_parts)
 
-        # Кнопки (кнопка ЧС для обоих режимов)
-        if mode == "worker":
-            buttons = [
-                [
-                    InlineKeyboardButton(
-                        "Проверить в ЧС",
-                        callback_data=f"check_blacklist:{item_id}"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "Игнорировать",
-                        callback_data=f"ignore:{item_id}"
-                    )
-                ]
-            ]
-        else:
-            # Для employer: сначала проверка в ЧС, потом связаться
-            buttons = [
-                [
-                    InlineKeyboardButton(
-                        "Проверить в ЧС",
-                        callback_data=f"check_blacklist:{item_id}"
-                    )
-                ],
-                #[
-                #    InlineKeyboardButton(
-                #        "Связаться",
-                #        url=item_data.get('message_link', '#')
-                #    )
-                #],
-                [
-                    InlineKeyboardButton(
-                        "Игнорировать",
-                        callback_data=f"ignore:{item_id}"
-                    )
-                ]
-            ]
+        # Кнопка "Связаться":
+        # 1. Есть username → t.me/{username} (открывает личку)
+        # 2. Нет username, но есть author_id → tg://user?id= (открывает профиль)
+        # 3. Нет ничего → кнопку не показываем
+        # Ссылку на мониторируемый чат (message_link) не используем намеренно.
+        contact_button = None
+        author_username = item_data.get('author_username')
+        author_id = item_data.get('author_id')
+
+        if author_username:
+            clean_username = author_username.lstrip('@')
+            contact_button = InlineKeyboardButton(
+                "💬 Связаться",
+                url=f"https://t.me/{clean_username}"
+            )
+        elif author_id is not None:
+            contact_button = InlineKeyboardButton(
+                "💬 Связаться",
+                url=f"tg://user?id={author_id}"
+            )
+
+        # Кнопки — одинаковые для обоих режимов (worker и employer)
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    "Проверить в ЧС",
+                    callback_data=f"check_blacklist:{item_id}"
+                )
+            ],
+        ]
+        if contact_button:
+            buttons.append([contact_button])
+        buttons.append([
+            InlineKeyboardButton(
+                "Игнорировать",
+                callback_data=f"ignore:{item_id}"
+            )
+        ])
 
         keyboard = InlineKeyboardMarkup(buttons)
 

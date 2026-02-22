@@ -1,6 +1,3 @@
-"""
-Извлечение структурированных данных из текста сообщений (regex)
-"""
 import re
 from typing import Optional, Dict
 from datetime import datetime, timedelta
@@ -8,71 +5,33 @@ from loguru import logger
 
 
 class MessageExtractor:
-    """Класс для извлечения данных из текста сообщений"""
+    """Извлечение структурированных данных из текста"""
 
-    # Ключевые слова для определения типа
-    # ВАЖНО: Проверяем в порядке приоритета (сначала работодатель!)
-
-    # РАБОТОДАТЕЛЬ (ищет сотрудников) - ПРИОРИТЕТ!
     EMPLOYER_KEYWORDS = [
-        # Явные признаки работодателя
-        "требуется сотрудник", "требуются сотрудник", "требуется работник",
-        "требуется оператор", "требуется замена",
-        "нужен сотрудник", "нужны сотрудник", "нужен работник", "нужны работник",
-        "нужна сотрудница", "нужны сотрудниц",
-        "ищу сотрудника", "ищем сотрудника", "ищем работника",
-        "ищу работника", "ищу на замену", "ищем на замену",
-        "нужна девочка", "нужен парень", "нужна девушка", "нужен мужчина",
-        "требуются работники", "нужны работники",
-
-        # Дополнительные варианты
-        "нужна замена", "нужен на замену", "нужна на замену",
-        "ищу замену", "ищем замену", "ищется замена",
-        "срочно нужен", "срочно нужна", "срочно требуется",
-        "требуются на", "нужны на",
-        "приглашаем на работу", "приглашаем в команду",
-        "вакансия", "открыта вакансия",
-        "набираем", "набираем сотрудников", "набор сотрудников",
-        "ищем в команду", "в команду нужен", "в команду нужна",
-
-        # Контекстные признаки (вакансия)
-        "на постоянную работу", "постоянные работники", "постоянного работника",
-        "с опытом на пвз", "опыт работы на пвз обязателен",
-        "резюме", "собеседование", "график работы", "оформление по тк"
+        "требуется", "требуются", "вакансия", "ищем", "набираем",
+        "приглашаем", "нужен сотрудник", "нужен работник",
+        "нужен человек", "ищем продавца", "оператора",
+        "на постоянную работу", "график работы", "оформление",
+        "выплаты", "зп 2 раза", "условия", "требования"
     ]
 
-    # РАБОТНИК (ищет работу)
     WORKER_KEYWORDS = [
-        # Явные признаки работника
-        "готов выйти", "выйду на смену", "выйду на замену", "выйду",
-        "могу выйти", "могу на", "могу в", "могу завтра", "могу сегодня", "могу",
-        "выхожу на",
-        "ищу работу", "ищу смену", "ищу подработку",
-        "возьму смену", "возьму замену",
-        "рассмотрю варианты", "рассмотрю предложения",
-        "есть опыт", "мой опыт", "работал на пвз", "работала на пвз"
+        "выйду", "могу выйти", "ищу работу", "ищу смену",
+        "ищу подработку", "возьму смену", "рассмотрю смены",
+        "устроюсь", "устроимся", "свободен", "готов работать",
+        "ищу пункт", "могу"
     ]
 
-    # Regex паттерны для извлечения данных
-    PRICE_PATTERNS = [
-        r'(\d{4,5})\s*(?:руб|₽|р|рублей)',
-        r'(?:цена|оплата|зп|зарплата|плата)\s*[-:—]?\s*(?:за\s+смену\s+)?(\d{4,5})',
-        r'\b(\d{4,5})\b',  # Просто число 4-5 цифр (последний приоритет)
-    ]
+    WEEKDAYS = {
+        "понедельник": 0, "вторник": 1, "среда": 2, "среду": 2,
+        "четверг": 3, "пятница": 4, "пятницу": 4,
+        "суббота": 5, "субботу": 5,
+        "воскресенье": 6
+    }
 
-    SHK_PATTERNS = [
-        r'шк\s*[-:—]\s*(\d+)',
-        r'шк\s*[-:—]?\s*(мало|много|средне)',
-        r'штрихкод[а-яё]*\s*[-:—]?\s*(\d+)',
-    ]
-
-    DATE_PATTERNS = [
-        r'(сегодня|завтра|послезавтра)',
-        r'(\d{1,2})\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)',
-        r'(\d{1,2})[./](\d{1,2})',
-    ]
-
-    LOCATION_PATTERN = r'(?:в\s+|г\.?\s+|город\s+)?([А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)?)'
+    WEEKDAY_ABBR = {
+        "пн": 0, "вт": 1, "ср": 2, "чт": 3, "пт": 4, "сб": 5, "вс": 6
+    }
 
     MONTHS = {
         'января': 1, 'февраля': 2, 'марта': 3, 'апреля': 4,
@@ -80,265 +39,199 @@ class MessageExtractor:
         'сентября': 9, 'октября': 10, 'ноября': 11, 'декабря': 12
     }
 
+    PRICE_PATTERNS = [
+        r'(\d+(?:[.,]\d+)?)\s*к\b(?!\s*\d)',  # 2к / 3 к / 2,5к — но НЕ "67 к 3" (адрес)
+        r'(\d+)\s*тыс',
+        r'(\d{3,5})\s*(?:₽|руб|р\.?)',
+        r'(?:ставка|зп|оплата)[^\d]{0,10}(\d{3,5})',
+        r'\b(\d{4,5})\b'
+    ]
+
+    SHK_PATTERNS = [
+        r'(\d{2,4})[^\S\n]*[-–][^\S\n]*(\d{2,4})[^\S\n]*шк',  # 150-200 шк (одна строка)
+        r'шк[^\S\n]*[-:—]?[^\S\n]*(\d{2,4})[^\S\n]*[-–][^\S\n]*(\d{2,4})',  # шк: 150-200
+        r'(\d{2,4})\s*шк',                               # 150 шк
+        r'шк\s+до\s+(\d{2,4})',                           # шк до 500
+        r'шк\s*[-:—]?\s*(\d{2,4})',                       # шк: 150 / шк 150
+        r'шк\s*[-:—]?\s*(мало|много|средне)',              # шк мало
+    ]
+
     @staticmethod
     def detect_type(text: str) -> Optional[str]:
-        """
-        Определить тип сообщения (работник/работодатель)
+        text = text.lower()
 
-        ВАЖНО: Проверяем СНАЧАЛА employer (приоритет!),
-        т.к. его признаки более специфичные
-        """
-        text_lower = text.lower()
-
-        # 1. СНАЧАЛА проверяем EMPLOYER (приоритет!)
-        for keyword in MessageExtractor.EMPLOYER_KEYWORDS:
-            if keyword in text_lower:
+        for k in MessageExtractor.EMPLOYER_KEYWORDS:
+            if k in text:
                 return "employer"
 
-        # 2. Потом проверяем WORKER
-        for keyword in MessageExtractor.WORKER_KEYWORDS:
-            if keyword in text_lower:
+        for k in MessageExtractor.WORKER_KEYWORDS:
+            if k in text:
                 return "worker"
 
         return None
 
     @staticmethod
-    def extract_price(text: str) -> Optional[int]:
-        """Извлечь цену"""
-        text = text.lower()
-
-        for pattern in MessageExtractor.PRICE_PATTERNS:
-            match = re.search(pattern, text)
-            if match:
-                try:
-                    price = int(match.group(1))
-                    if 1000 <= price <= 99999:  # Разумный диапазон для цены за смену
-                        return price
-                except (ValueError, IndexError):
-                    continue
-
-        return None
-
-    @staticmethod
-    def extract_shk(text: str) -> Optional[str]:
-        """Извлечь ШК (штрихкоды)"""
-        text = text.lower()
-
-        for pattern in MessageExtractor.SHK_PATTERNS:
-            match = re.search(pattern, text)
-            if match:
-                return match.group(1)
-
-        return None
+    def _nearest_weekday(target: int, base: datetime) -> datetime:
+        days_ahead = target - base.weekday()
+        if days_ahead < 0:
+            days_ahead += 7
+        return base + timedelta(days=days_ahead)
 
     @staticmethod
     def extract_date(text: str, message_date: datetime) -> Optional[str]:
-        """Извлечь дату"""
         text = text.lower()
 
-        # Относительные даты (проверяем в обратном порядке для приоритета)
-        if 'послезавтра' in text:
+        if "послезавтра" in text:
             return (message_date + timedelta(days=2)).date().isoformat()
-        elif 'завтра' in text:
+        if "завтра" in text:
             return (message_date + timedelta(days=1)).date().isoformat()
-        elif 'сегодня' in text or 'сейчас' in text:
+        if "сегодня" in text:
             return message_date.date().isoformat()
 
-        # Дата с названием месяца (15 февраля)
-        month_pattern = r'(\d{1,2})\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)'
-        match = re.search(month_pattern, text)
-        if match:
-            day = int(match.group(1))
-            month_name = match.group(2)
-            month = MessageExtractor.MONTHS.get(month_name)
-            if month and 1 <= day <= 31:
-                year = message_date.year
-                try:
-                    return datetime(year, month, day).date().isoformat()
-                except ValueError:
-                    pass
+        for word, num in MessageExtractor.WEEKDAYS.items():
+            if re.search(r'\b' + re.escape(word) + r'\b', text):
+                return MessageExtractor._nearest_weekday(num, message_date).date().isoformat()
 
-        # Дата в формате 15.02 или 15/02
-        date_pattern = r'(\d{1,2})[./](\d{1,2})'
-        match = re.search(date_pattern, text)
-        if match:
-            day = int(match.group(1))
-            month = int(match.group(2))
-            if 1 <= day <= 31 and 1 <= month <= 12:
-                year = message_date.year
-                try:
-                    return datetime(year, month, day).date().isoformat()
-                except ValueError:
-                    pass
+        abbr = re.search(r'\b(пн|вт|ср|чт|пт|сб|вс)\b', text)
+        if abbr:
+            num = MessageExtractor.WEEKDAY_ABBR[abbr.group(1)]
+            return MessageExtractor._nearest_weekday(num, message_date).date().isoformat()
+
+        m = re.search(r'(\d{1,2})[-\s]?(?:го|числа)', text)
+        if m:
+            day = int(m.group(1))
+            month = message_date.month
+            year = message_date.year
+            try:
+                dt = datetime(year, month, day)
+                if dt.date() < message_date.date():
+                    next_month = month + 1 if month < 12 else 1
+                    next_year = year if month < 12 else year + 1
+                    dt = datetime(next_year, next_month, day)
+                return dt.date().isoformat()
+            except ValueError:
+                pass
+
+        m = re.search(r'(\d{1,2})[./](\d{1,2})', text)
+        if m:
+            day, month = map(int, m.groups())
+            year = message_date.year
+            try:
+                dt = datetime(year, month, day)
+                if dt.date() < message_date.date():
+                    dt = datetime(year + 1, month, day)
+                return dt.date().isoformat()
+            except ValueError:
+                pass
+
+        m = re.search(r'(\d{1,2})\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)', text)
+        if m:
+            day = int(m.group(1))
+            month = MessageExtractor.MONTHS[m.group(2)]
+            year = message_date.year
+            dt = datetime(year, month, day)
+            if dt.date() < message_date.date():
+                dt = datetime(year + 1, month, day)
+            return dt.date().isoformat()
 
         return None
 
     @staticmethod
-    def extract_location(text: str) -> Optional[str]:
-        """Извлечь локацию (город) - старый метод для обратной совместимости"""
-        # Ищем слова с заглавной буквы (потенциальные названия городов)
-        matches = re.findall(MessageExtractor.LOCATION_PATTERN, text)
+    def extract_price(text: str, msg_type: Optional[str]) -> Optional[int]:
+        text = text.lower()
+        prices = []
 
-        # Исключаем общие слова
-        excluded = {'Готов', 'Выйду', 'Могу', 'Работа', 'Ищу', 'Нужен', 'Требуется'}
+        for pattern in MessageExtractor.PRICE_PATTERNS:
+            for m in re.finditer(pattern, text):
+                try:
+                    val = m.group(1).replace(",", ".")
+                    price = float(val)
+                    if "к" in m.group(0) or "тыс" in m.group(0):
+                        price *= 1000
+                    prices.append(int(price))
+                except (ValueError, IndexError):
+                    continue
 
-        for match in matches:
-            if match not in excluded:
-                return match
+        if not prices:
+            return None
+
+        return min(prices) if msg_type == "worker" else max(prices)
+
+    @staticmethod
+    def extract_shk(text: str) -> Optional[str]:
+        text = text.lower()
+
+        for pattern in MessageExtractor.SHK_PATTERNS:
+            m = re.search(pattern, text)
+            if m:
+                if m.lastindex and m.lastindex >= 2:
+                    return f"{m.group(1)}-{m.group(2)}"
+                return m.group(1)
 
         return None
 
     @staticmethod
-    def extract_location_structured(text: str, topic_name: Optional[str] = None) -> dict:
-        """
-        Умное извлечение локации (структурированное)
+    def extract_location_structured(text: str, topic_name: Optional[str] = None) -> Dict:
+        """Извлечь структурированную локацию: город, метро, район"""
+        result = {'city': None, 'metro_station': None, 'district': None}
 
-        Извлекает:
-        - city: Город (Москва, СПБ) - из топика или из текста
-        - metro_station: Станция метро (Водный стадион, Выхино)
-        - district: Район (ЮВАО, ЮАО, ЦАО)
-
-        Args:
-            text: текст сообщения
-            topic_name: название топика (например, "МСК - Ozon")
-
-        Returns:
-            dict с ключами: city, metro_station, district
-        """
-        text_lower = text.lower()
-
-        result = {
-            'city': None,
-            'metro_station': None,
-            'district': None
-        }
-
-        # 1. ГОРОД (приоритет: топик → текст)
-
-        # Из топика (если есть)
+        # Город из названия топика
         if topic_name:
-            topic_lower = topic_name.lower()
-            if 'мск' in topic_lower or 'москва' in topic_lower:
+            t = topic_name.upper()
+            if 'МСК' in t or 'МОСКВА' in t:
                 result['city'] = 'Москва'
-            elif 'спб' in topic_lower or 'питер' in topic_lower or 'санкт' in topic_lower:
+            elif 'СПБ' in t or 'ПИТЕР' in t or 'САНКТ' in t:
                 result['city'] = 'Санкт-Петербург'
 
-        # Из текста (если не нашли в топике)
-        if not result['city']:
-            CITIES = {
-                'москва': 'Москва',
-                'мск': 'Москва',
-                'moscow': 'Москва',
-                'спб': 'Санкт-Петербург',
-                'питер': 'Санкт-Петербург',
-                'санкт-петербург': 'Санкт-Петербург',
-                'зеленоград': 'Зеленоград',
-                'мо': 'Московская область',
-                'подмосковье': 'Московская область'
-            }
+        # Метро: "Метро Селигерское", "м. Войковская"
+        m = re.search(r'(?:метро|м\.)\s*([^\n,\./]{2,30})', text, re.IGNORECASE)
+        if m:
+            result['metro_station'] = m.group(1).strip()
 
-            for key, city in CITIES.items():
-                if key in text_lower:
-                    result['city'] = city
-                    break
-
-        # 2. МЕТРО
-
-        # Паттерны для метро
-        metro_patterns = [
-            r'(?:метро|м\.|мцк)\s+([А-Яа-яЁё\s]+?)(?:\s|,|\.|\n|$)',  # "метро Водный стадион"
-            r'(?:^|\n)([А-Я][а-я]+(?:\s[А-Я][а-я]+)?)\s+метро',  # "Выхино метро"
-        ]
-
-        for pattern in metro_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                station = match.group(1).strip()
-                # Исключаем слишком общие слова
-                if len(station) > 3 and station.lower() not in ['любое', 'не важно', 'любой']:
-                    result['metro_station'] = station.title()
-                    break
-
-        # 3. РАЙОН (округа Москвы)
-
-        DISTRICTS = ['юао', 'ювао', 'цао', 'сао', 'свао', 'сзао', 'зао', 'юзао']
-
-        for district in DISTRICTS:
-            if district in text_lower:
-                result['district'] = district.upper()
-                break
+        # Район: ЮВАО, ЮАО, СЗАО, ЦАО и т.д.
+        d = re.search(r'\b([А-ЯЁ]{1,4}АО)\b', text)
+        if d:
+            result['district'] = d.group(1)
 
         return result
 
     @staticmethod
+    def has_worker_intent(text: str) -> bool:
+        return bool(re.search(r'выйду|ищу|устроюсь|свободен|готов', text.lower()))
+
+    @staticmethod
     def extract(text: str, message_date: datetime) -> Optional[Dict]:
-        """
-        Извлечь все данные из сообщения
-
-        Возвращает словарь с полями:
-        - type: "worker" или "employer"
-        - price: int
-        - date: str (ISO format)
-        - shk: Optional[str]
-        - location: Optional[str]
-        """
-        # Извлекаем цену (обязательно)
-        price = MessageExtractor.extract_price(text)
-        if not price:
-            logger.debug(f"Цена не найдена в сообщении: {text[:50]}...")
-            return None
-
-        # Извлекаем дату (обязательно)
-        work_date = MessageExtractor.extract_date(text, message_date)
-        if not work_date:
-            logger.debug(f"Дата не найдена в сообщении: {text[:50]}...")
-            return None
-
-        # Определяем тип
         msg_type = MessageExtractor.detect_type(text)
 
-        # FALLBACK LOGIC: если тип не определён, но есть цена+дата,
-        # скорее всего это работник (работодатели пишут более детально)
-        if not msg_type:
-            # Короткие сообщения с ценой и датой = работники
-            if len(text) < 100:  # Короткое сообщение
-                logger.debug(f"Fallback: короткое сообщение с ценой+датой → worker: {text[:50]}...")
+        date = MessageExtractor.extract_date(text, message_date)
+        shk = MessageExtractor.extract_shk(text)
+
+        if not date:
+            date = message_date.date().isoformat()
+
+        # Нормализуем тип ДО извлечения цены — влияет на выбор min/max
+        effective_type = msg_type
+        if effective_type is None and MessageExtractor.has_worker_intent(text):
+            effective_type = "worker"
+
+        price = MessageExtractor.extract_price(text, effective_type)
+
+        # Финальная нормализация типа
+        if msg_type is None:
+            if effective_type == "worker":
+                # Intent без явного keyword — работник
                 msg_type = "worker"
+            elif price is not None:
+                # Нет ни keyword, ни intent — чаты специализированные, дефолт employer
+                msg_type = "employer"
             else:
-                logger.debug(f"Тип не определён в сообщении: {text[:50]}...")
+                logger.debug(f"Цена и тип не найдены: {text[:50]}")
                 return None
 
-        # Извлекаем опциональные поля
-        shk = MessageExtractor.extract_shk(text)
-        location = MessageExtractor.extract_location(text)
-
         return {
-            'type': msg_type,
-            'price': price,
-            'date': work_date,
-            'shk': shk,
-            'location': location
+            "type": msg_type,
+            "price": price,
+            "date": date,
+            "shk": shk,
+            "location": None
         }
-
-
-# Тесты
-if __name__ == "__main__":
-    test_messages = [
-        "Готов выйти сегодня, цена за смену 3000",
-        "Выйду на замену, завтра, оплата 2500 руб",
-        "Могу 15 февраля, 2800₽, шк - 100",
-        "Работа ПВЗ, послезавтра, 3500, шк мало",
-        "Ищу сотрудника на замену, Мытищи, 20 февраля, 2800",
-        "Нужен работник в ПВЗ, завтра, оплата 3000 р, шк - 200",
-        "15.02 могу выйти, зп 3200, штрихкодов 150"
-    ]
-
-    test_date = datetime(2026, 2, 1, 12, 0, 0)
-
-    for msg in test_messages:
-        print(f"\n📝 Тест: {msg}")
-        result = MessageExtractor.extract(msg, test_date)
-        if result:
-            print(f"✅ Результат: {result}")
-        else:
-            print("❌ Данные не извлечены")

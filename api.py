@@ -4,7 +4,7 @@ FastAPI REST API для Workers Service
 import json
 import uuid
 import asyncio
-from datetime import datetime
+from datetime import datetime, date as date_type
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.responses import JSONResponse
 from loguru import logger
@@ -95,11 +95,31 @@ async def startup_event():
     paused_tasks = await db_service.get_tasks_by_status('paused')
     if paused_tasks:
         logger.info(f"Восстановление {len(paused_tasks)} задач после рестарта...")
+
+        # Дедупликация по session_path: одна сессия Pyrogram = один клиент.
+        # Если несколько задач используют одну сессию — восстанавливаем только последнюю
+        # (по порядку created_at), остальные помечаем как stopped.
+        latest_by_session: dict = {}
         for task in paused_tasks:
+            key = task.session_path or config.SESSION_PATH
+            existing = latest_by_session.get(key)
+            if existing is None or task.created_at > existing.created_at:
+                latest_by_session[key] = task
+
+        # Помечаем устаревшие дубли как stopped
+        for task in paused_tasks:
+            key = task.session_path or config.SESSION_PATH
+            if latest_by_session[key].task_id != task.task_id:
+                await db_service.update_task_status(task_id=task.task_id, status='stopped')
+                logger.info(f"Дубль задачи {task.task_id} (та же сессия) → stopped")
+
+        # Восстанавливаем только уникальные задачи по сессии
+        restored = 0
+        for task in latest_by_session.values():
             try:
                 filters = json.loads(task.filters)
-                filters['date_from'] = datetime.fromisoformat(filters['date_from'])
-                filters['date_to'] = datetime.fromisoformat(filters['date_to'])
+                filters['date_from'] = date_type.fromisoformat(filters['date_from'])
+                filters['date_to'] = date_type.fromisoformat(filters['date_to'])
 
                 start_monitoring_task(
                     task_id=task.task_id,
@@ -113,10 +133,11 @@ async def startup_event():
                     parse_history_days=0,
                     session_path=task.session_path or config.SESSION_PATH
                 )
+                restored += 1
                 logger.info(f"Задача {task.task_id} (user={task.user_id}) восстановлена")
             except Exception as e:
                 logger.error(f"Ошибка восстановления задачи {task.task_id}: {e}")
-        logger.info(f"Восстановлено задач: {len(paused_tasks)}")
+        logger.info(f"Восстановлено задач: {restored} из {len(paused_tasks)}")
 
     # Инициализация сервиса черного списка (без запуска клиента!)
     # Используем ОТДЕЛЬНУЮ сессию чтобы не конфликтовать с основным парсером
