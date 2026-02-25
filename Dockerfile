@@ -14,6 +14,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Копируем исходный код
 COPY *.py ./
 
+# Копируем словари гео-фильтра
+COPY data/geo/ ./data/geo/
+
 # Создаем директории для данных (будут перекрыты volumes)
 RUN mkdir -p /app/sessions /app/db /app/logs
 

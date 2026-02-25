@@ -350,7 +350,7 @@ class BlacklistService:
             "message_id": raw_msg.id,
             "message_date": msg_date.isoformat(),
             "extracted_info": extracted,
-            "message_text": text[:500]
+            "message_text": text
         }
 
     def _build_found_result(self, message, text: str, match_type: str, match_value, chat_username: str) -> Dict:
@@ -371,7 +371,7 @@ class BlacklistService:
             "message_id": message.id,
             "message_date": message.date.isoformat(),
             "extracted_info": extracted,
-            "message_text": text[:500]  # Первые 500 символов
+            "message_text": text
         }
 
     def _extract_info(self, text: str) -> Dict:

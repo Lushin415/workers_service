@@ -179,12 +179,17 @@ async def shutdown_event():
             # Останавливаем задачу в state_manager
             state_manager.stop_task(task_id)
 
-            # Обновляем статус в БД — 'paused' чтобы задача восстановилась после рестарта
-            await db_service.update_task_status(
-                task_id=task_id,
-                status='paused'
-            )
-            logger.debug(f"Задача {task_id} остановлена")
+            # Обновляем статус в БД — 'paused' только если задача не была явно остановлена пользователем
+            # Иначе shutdown_event перезапишет 'stopped' → 'paused' и задача воскреснет после рестарта
+            db_task = await db_service.get_task(task_id)
+            if db_task and db_task.status == 'stopped':
+                logger.debug(f"Задача {task_id} уже остановлена пользователем, статус не трогаем")
+            else:
+                await db_service.update_task_status(
+                    task_id=task_id,
+                    status='paused'
+                )
+                logger.debug(f"Задача {task_id} → paused (восстановится после рестарта)")
         except Exception as e:
             logger.error(f"Ошибка остановки задачи {task_id}: {e}")
 

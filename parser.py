@@ -2,6 +2,7 @@
 Парсинг Telegram чатов через Pyrogram (MTProto API)
 """
 import asyncio
+import sqlite3
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.raw.functions.channels import GetForumTopics
@@ -27,19 +28,35 @@ class TelegramParser:
         self.message_handler: Callable = None
 
     async def start(self):
-        """Запустить клиент Pyrogram"""
+        """Запустить клиент Pyrogram.
+
+        Если SQLite-файл сессии заблокирован предыдущей задачей, повторяем
+        попытку с экспоненциальным backoff (до 5 попыток, итого ~60 сек).
+        """
         # ВАЖНО: НЕ указываем workdir, так как session_name содержит ПОЛНЫЙ путь
         # (например: /shared/sessions/338908929_parser)
         # Pyrogram сам добавит .session расширение
-        self.client = Client(
-            name=self.session_name,
-            api_id=self.api_id,
-            api_hash=self.api_hash,
-            # workdir НЕ УКАЗЫВАЕМ - используется полный путь из name
-        )
-
-        await self.client.start()
-        logger.info(f"Pyrogram клиент запущен (сессия: {self.session_name})")
+        max_attempts = 5
+        for attempt in range(1, max_attempts + 1):
+            self.client = Client(
+                name=self.session_name,
+                api_id=self.api_id,
+                api_hash=self.api_hash,
+                # workdir НЕ УКАЗЫВАЕМ - используется полный путь из name
+            )
+            try:
+                await self.client.start()
+                logger.info(f"Pyrogram клиент запущен (сессия: {self.session_name})")
+                return
+            except sqlite3.OperationalError as e:
+                if "database is locked" not in str(e) or attempt == max_attempts:
+                    raise
+                wait = 2 ** attempt  # 2, 4, 8, 16, 32 сек
+                logger.warning(
+                    f"Сессия {self.session_name!r} заблокирована, "
+                    f"повтор через {wait}с (попытка {attempt}/{max_attempts})"
+                )
+                await asyncio.sleep(wait)
 
     async def stop(self):
         """Остановить клиент"""
