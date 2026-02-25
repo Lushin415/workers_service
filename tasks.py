@@ -3,13 +3,14 @@
 """
 import asyncio
 from datetime import datetime
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Optional
 from loguru import logger
 
 from config import config
 from parser import TelegramParser
 from message_extractor import MessageExtractor
 from filters import ItemFilter
+from geo_filter import geo_filter
 from db_service import DBService
 from tg_notifier import TelegramNotifier
 from state_manager import state_manager
@@ -38,25 +39,61 @@ class MonitoringTask:
         self.mode = mode
         self.api_id = api_id
 
-        # Парсим фильтры по топикам: "@chat/topic_id" → chat_topic_filter["@chat"] = topic_id
-        # Для обычных чатов (без "/") фильтра нет → мониторим весь чат
-        self.chat_topic_filter: Dict[str, int] = {}
+        # Парсим чаты: поддерживаемый формат "@chat/topic_id#ГОРОД"
+        #   @chat              — обычный чат, гео-фильтр по тексту
+        #   @chat#МСК          — городской чат Москвы (весь), гео-фильтр пропускается
+        #   @chat#СПБ          — городской чат СПб (весь),   гео-фильтр пропускается
+        #   @chat/912#МСК      — конкретный топик + метка города
+        #   @chat/912          — конкретный топик без метки, гео-фильтр по тексту
+        #
+        # chat_topic_filter:  chat → set разрешённых topic_id
+        # chat_topic_city:    chat → {topic_id → city_tag}  (МСК/СПБ)
+        # chat_city_override: chat → city_tag  (для чатов без топиков, @chat#МСК)
+        self.chat_topic_filter: Dict[str, Set[int]] = {}
+        self.chat_topic_city: Dict[str, Dict[int, str]] = {}
+        self.chat_city_override: Dict[str, str] = {}
         parsed_chats = []
-        for chat in chats:
-            if '/' in chat:
-                parts = chat.rsplit('/', 1)
+        for raw_chat in chats:
+            # 1. Отделяем метку города (суффикс после последнего #)
+            city_override = None
+            if '#' in raw_chat:
+                chat_part, city_tag = raw_chat.rsplit('#', 1)
+                city_tag = city_tag.strip().upper()
+                if city_tag in ('МСК', 'СПБ'):
+                    city_override = city_tag
+                else:
+                    chat_part = raw_chat   # неизвестный тег — игнорируем
+            else:
+                chat_part = raw_chat
+
+            # 2. Парсим топик: "@chat/912" → base_chat="@chat", topic=912
+            if '/' in chat_part:
+                parts = chat_part.rsplit('/', 1)
                 try:
                     base_chat = parts[0]
-                    required_topic_id = int(parts[1])
-                    self.chat_topic_filter[base_chat] = required_topic_id
+                    topic_id = int(parts[1])
+                    # Добавляем topic_id в множество разрешённых топиков
+                    if base_chat not in self.chat_topic_filter:
+                        self.chat_topic_filter[base_chat] = set()
+                    self.chat_topic_filter[base_chat].add(topic_id)
+                    # Сохраняем метку города для конкретного топика
+                    if city_override:
+                        if base_chat not in self.chat_topic_city:
+                            self.chat_topic_city[base_chat] = {}
+                        self.chat_topic_city[base_chat][topic_id] = city_override
                     if base_chat not in parsed_chats:
                         parsed_chats.append(base_chat)
                 except ValueError:
-                    if chat not in parsed_chats:
-                        parsed_chats.append(chat)
+                    if chat_part not in parsed_chats:
+                        parsed_chats.append(chat_part)
+                    if city_override:
+                        self.chat_city_override[chat_part] = city_override
             else:
-                if chat not in parsed_chats:
-                    parsed_chats.append(chat)
+                if chat_part not in parsed_chats:
+                    parsed_chats.append(chat_part)
+                if city_override:
+                    self.chat_city_override[chat_part] = city_override
+
         self.chats = parsed_chats
         self.api_hash = api_hash
         self.notification_chat_id = notification_chat_id
@@ -117,14 +154,23 @@ class MonitoringTask:
             )
 
             # Фильтр по топику: если чат указан как "@chat/topic_id" — пропускаем
-            # сообщения из других топиков этого форума
-            required_topic = self.chat_topic_filter.get(chat_name)
-            if required_topic is not None:
-                actual_topic = getattr(message, 'message_thread_id', None)
-                if actual_topic != required_topic:
+            # сообщения из других топиков этого форума.
+            #
+            # В Pyrogram 2.0.106 нет message_thread_id; для forum-сообщений используем:
+            #   reply_to_top_message_id  — topic_id при ответе внутри топика
+            #   reply_to_message_id      — topic_id при первом сообщении в топик
+            # (одно из них всегда равно ID топика)
+            allowed_topics: Optional[Set[int]] = self.chat_topic_filter.get(chat_name)
+            actual_topic: Optional[int] = None
+            if allowed_topics is not None:
+                actual_topic = (
+                    getattr(message, 'reply_to_top_message_id', None)
+                    or getattr(message, 'reply_to_message_id', None)
+                )
+                if actual_topic not in allowed_topics:
                     logger.debug(
                         f"[TOPIC FILTER] Пропущено: {chat_name} топик={actual_topic}, "
-                        f"ожидается={required_topic}"
+                        f"разрешены={allowed_topics}"
                     )
                     return
 
@@ -146,6 +192,55 @@ class MonitoringTask:
                 logger.debug(f"[FILTER] Сообщение из {chat_name} пропущено: тип '{extracted['type']}' != режим '{self.mode}'")
                 return
 
+            # Гео-фильтр: исключаем сообщения чужого города.
+            #
+            # Приоритет:
+            #   1. Метка города на конкретном топике (@chat/912#МСК)
+            #   2. Метка города на всём чате (@chat#МСК)
+            #   3. Гео-фильтр по тексту сообщения
+            # Гео-фильтр: исключаем сообщения чужого города.
+            #
+            # Логика:
+            #   Топик с тегом (#МСК / #СПБ) — город известен точно:
+            #     • тег совпадает с city_filter → берём без текстового гео-фильтра
+            #     • тег не совпадает            → пропускаем
+            #   Топик без тега (общий, напр. 8984) — текстовый гео-фильтр обязателен
+            #   Чат с тегом (@chat#МСК) — аналогично топику с тегом
+            skip_geo = False
+
+            if actual_topic is not None and chat_name in self.chat_topic_city:
+                topic_city = self.chat_topic_city[chat_name].get(actual_topic)
+                if topic_city:
+                    # Топик имеет тег города → доверяем тегу
+                    skip_geo = True
+                    if self.city_filter != 'ALL' and topic_city != self.city_filter:
+                        logger.debug(
+                            f"[GEO] {chat_name} топик={actual_topic} помечен {topic_city}, "
+                            f"задача — {self.city_filter}: пропускаем"
+                        )
+                        return
+                    # topic_city == city_filter → берём, гео-фильтр по тексту не нужен
+
+            if not skip_geo:
+                chat_city = self.chat_city_override.get(chat_name)
+                if chat_city:
+                    skip_geo = True
+                    if self.city_filter != 'ALL' and chat_city != self.city_filter:
+                        logger.debug(
+                            f"[GEO] Чат {chat_name} помечен как {chat_city}, "
+                            f"задача — {self.city_filter}: пропускаем"
+                        )
+                        return
+
+            if not skip_geo:
+                # Топик/чат без тега — текстовый гео-фильтр обязателен
+                if self.city_filter == 'МСК':
+                    if not geo_filter.should_take_for_moscow(message_text):
+                        return
+                elif self.city_filter == 'СПБ':
+                    if not geo_filter.should_take_for_spb(message_text):
+                        return
+
             # Применяем фильтры
             if not self.item_filter.matches(extracted):
                 logger.debug(f"[FILTER] Сообщение из {chat_name} НЕ прошло фильтры (дата/цена/ШК)")
@@ -159,25 +254,21 @@ class MonitoringTask:
                 author_full_name = f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip()
                 author_id = message.from_user.id  # Сохраняем Telegram User ID
 
-            # Извлекаем topic_id и topic_name (для форумов/супергрупп)
-            topic_id = None
+            # Извлекаем topic_id и topic_name (для форумов/супергрупп).
+            # actual_topic уже вычислен выше при проверке topic filter;
+            # если топик-фильтра нет — определяем по reply_to атрибутам.
+            topic_id = actual_topic
+            if topic_id is None:
+                # Чат без топик-фильтра — попробуем определить топик по reply_to
+                rid_top = getattr(message, 'reply_to_top_message_id', None)
+                rid = getattr(message, 'reply_to_message_id', None)
+                candidate = rid_top or rid
+                if candidate:
+                    chat_topics = self.topics_cache.get(chat_name, {})
+                    if candidate in chat_topics:
+                        topic_id = candidate
+                        logger.debug(f"Сообщение из топика (cache lookup): topic_id={topic_id}")
             topic_name = None
-
-            # Pyrogram предоставляет message_thread_id для сообщений в топиках
-            if hasattr(message, 'message_thread_id') and message.message_thread_id:
-                topic_id = message.message_thread_id
-                logger.debug(f"Сообщение из топика: topic_id={topic_id}")
-            elif hasattr(message, 'reply_to_message_id') and message.reply_to_message_id:
-                # Fallback: используем reply_to_message_id если оно совпадает с известным topic_id из кэша
-                rid = message.reply_to_message_id
-                chat_topics = self.topics_cache.get(chat_name, {})
-                if rid in chat_topics:
-                    topic_id = rid
-                    logger.debug(f"Сообщение из топика (через reply_to+cache): topic_id={topic_id}")
-                elif message.id - rid > 100:
-                    # Запасной вариант: большая разница ID говорит о топике (старая эвристика)
-                    topic_id = rid
-                    logger.debug(f"Сообщение из топика (через reply_to эвристика): topic_id={topic_id}")
 
             if topic_id:
 
@@ -211,24 +302,8 @@ class MonitoringTask:
                             logger.debug(f"Fallback: извлечено название топика из текста: {topic_name}")
                             break
 
-            # Умное извлечение локации (структурированное)
-            # Город извлекается из топика (если есть) или из текста
-            location_data = MessageExtractor.extract_location_structured(message_text, topic_name)
-            city = location_data['city']
-            metro_station = location_data['metro_station']
-            district = location_data['district']
-
             # Формируем ссылку на сообщение
             message_link = f"https://t.me/{chat_name.lstrip('@')}/{message.id}"
-
-            # Фильтрация по городу (через topic_name)
-            if self.city_filter != "ALL":
-                if not topic_name or self.city_filter not in topic_name.upper():
-                    logger.debug(
-                        f"Пропущено: топик '{topic_name}' не соответствует "
-                        f"фильтру города '{self.city_filter}'"
-                    )
-                    return
 
             # ДВУХУРОВНЕВАЯ ДЕДУПЛИКАЦИЯ:
 
@@ -276,9 +351,9 @@ class MonitoringTask:
                 price=extracted['price'],
                 shk=extracted.get('shk'),
                 location=extracted.get('location'),  # Старое поле (для обратной совместимости)
-                city=city,  # Город (Москва, СПБ)
-                metro_station=metro_station,  # Станция метро
-                district=district,  # Район (ЮВАО, ЮАО)
+                city=None,
+                metro_station=None,
+                district=None,
                 message_text=message_text,
                 message_link=message_link,
                 chat_name=chat_name,
@@ -303,9 +378,9 @@ class MonitoringTask:
                     'price': extracted['price'],
                     'shk': extracted.get('shk'),
                     'location': extracted.get('location'),  # Старое поле (для обратной совместимости)
-                    'city': city,  # Город (из топика или из текста)
-                    'metro_station': metro_station,  # Станция метро
-                    'district': district,  # Район
+                    'city': None,
+                    'metro_station': None,
+                    'district': None,
                     'topic_name': topic_name,  # Название топика (МСК - Ozon и т.д.)
                     'author_username': author_username,
                     'author_full_name': author_full_name,

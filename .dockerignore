@@ -29,7 +29,9 @@ test_*.py
 *.session
 *.session-journal
 *.log
-data/
+data/db/
+data/sessions/
+# data/geo/ — словари гео-фильтра, копируются в образ (см. Dockerfile)
 
 # Docs
 *.md

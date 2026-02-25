@@ -171,31 +171,6 @@ class MessageExtractor:
         return None
 
     @staticmethod
-    def extract_location_structured(text: str, topic_name: Optional[str] = None) -> Dict:
-        """Извлечь структурированную локацию: город, метро, район"""
-        result = {'city': None, 'metro_station': None, 'district': None}
-
-        # Город из названия топика
-        if topic_name:
-            t = topic_name.upper()
-            if 'МСК' in t or 'МОСКВА' in t:
-                result['city'] = 'Москва'
-            elif 'СПБ' in t or 'ПИТЕР' in t or 'САНКТ' in t:
-                result['city'] = 'Санкт-Петербург'
-
-        # Метро: "Метро Селигерское", "м. Войковская"
-        m = re.search(r'(?:метро|м\.)\s*([^\n,\./]{2,30})', text, re.IGNORECASE)
-        if m:
-            result['metro_station'] = m.group(1).strip()
-
-        # Район: ЮВАО, ЮАО, СЗАО, ЦАО и т.д.
-        d = re.search(r'\b([А-ЯЁ]{1,4}АО)\b', text)
-        if d:
-            result['district'] = d.group(1)
-
-        return result
-
-    @staticmethod
     def has_worker_intent(text: str) -> bool:
         return bool(re.search(r'выйду|ищу|устроюсь|свободен|готов', text.lower()))
 
