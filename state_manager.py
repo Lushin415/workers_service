@@ -111,6 +111,31 @@ class StateManager:
                 return self._tasks[task_id]['stop_event'].is_set()
             return True
 
+    def cleanup_old_tasks(self, max_age_seconds: int = 86400):
+        """
+        Удаляет задачи, остановленные более 24 часов назад.
+        Предотвращает бесконечный рост словаря _tasks и утечку RAM.
+        Выполняется под блокировкой (thread-safe).
+        """
+        with self._lock:
+            now = datetime.utcnow()
+            to_delete = []
+            for tid, tdata in self._tasks.items():
+                if tdata['status'] in ['stopped', 'failed', 'auth_error']:
+                    last_update_str = tdata['stats']['last_update'].replace('Z', '')
+                    try:
+                        last_update = datetime.fromisoformat(last_update_str)
+                        if (now - last_update).total_seconds() > max_age_seconds:
+                            to_delete.append(tid)
+                    except ValueError:
+                        to_delete.append(tid)  # Если формат сломан — удаляем
+
+            for tid in to_delete:
+                del self._tasks[tid]
+
+            if to_delete:
+                logger.info(f"Очищено {len(to_delete)} старых задач из state_manager (RAM)")
+
 
 # Глобальный экземпляр
 state_manager = StateManager()

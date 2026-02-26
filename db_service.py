@@ -905,20 +905,38 @@ class DBService:
         threshold = (datetime.utcnow() - timedelta(days=days)).isoformat()
 
         async with aiosqlite.connect(self.db_path) as db:
-            # Удаляем старые записи
+            # 1. Очистка found_items
             cursor = await db.execute(
                 "DELETE FROM found_items WHERE found_at < ?",
                 (threshold,)
             )
-            deleted_count = cursor.rowcount
+            deleted_items = cursor.rowcount
+
+            # 2. Очистка старых задач из истории (только завершённые — не трогаем paused/running/pending)
+            cursor_tasks = await db.execute(
+                "DELETE FROM tasks WHERE created_at < ? AND status IN ('stopped', 'failed', 'auth_error')",
+                (threshold,)
+            )
+            deleted_tasks = cursor_tasks.rowcount
+
+            # 3. Очистка старого кэша черного списка
+            cursor_bl = await db.execute(
+                "DELETE FROM blacklist_cache WHERE parsed_at < ?",
+                (threshold,)
+            )
+            deleted_bl = cursor_bl.rowcount
+
             await db.commit()
 
-            if deleted_count > 0:
-                logger.info(f"Auto-cleanup: удалено {deleted_count} записей старше {days} дней")
+            if deleted_items > 0 or deleted_tasks > 0 or deleted_bl > 0:
+                logger.info(
+                    f"Auto-cleanup (> {days} дней): удалено {deleted_items} объявлений, "
+                    f"{deleted_tasks} задач, {deleted_bl} записей ЧС"
+                )
             else:
                 logger.debug(f"Auto-cleanup: старых записей не найдено (>{days} дней)")
 
-            return deleted_count
+            return deleted_items
 
     async def get_db_stats(self) -> dict:
         """

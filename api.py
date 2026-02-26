@@ -31,7 +31,8 @@ from callback_handler import CallbackHandler
 
 
 # Настройка логирования
-logger.add(config.LOG_PATH, rotation="10 MB", level="INFO")
+# Добавляем retention="7 days", чтобы старые логи удалялись и не забивали диск 15 ГБ
+logger.add(config.LOG_PATH, rotation="10 MB", retention="7 days", level="INFO")
 
 # Создание FastAPI приложения
 app = FastAPI(
@@ -61,6 +62,9 @@ async def cleanup_old_items_periodically():
         try:
             # Ждём 24 часа (86400 секунд)
             await asyncio.sleep(86400)
+
+            # Очистка оперативной памяти от старых задач (stopped/failed > 24 часов)
+            state_manager.cleanup_old_tasks()
 
             # Очищаем записи старше 30 дней
             deleted_count = await db_service.cleanup_old_items(days=30)
